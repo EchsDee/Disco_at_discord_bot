@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shlex
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
+CONFIG_PATH = Path("bot_config.json")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN. Put it in a .env file or environment variable.")
@@ -44,6 +46,28 @@ FFMPEG_OPTIONS = {
 }
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+
+def load_config() -> dict[str, dict[str, int]]:
+    if not CONFIG_PATH.exists():
+        return {"music_channels": {}}
+
+    try:
+        with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+            config = json.load(config_file)
+    except (json.JSONDecodeError, OSError):
+        return {"music_channels": {}}
+
+    config.setdefault("music_channels", {})
+    return config
+
+
+def save_config(config: dict[str, dict[str, int]]) -> None:
+    with CONFIG_PATH.open("w", encoding="utf-8") as config_file:
+        json.dump(config, config_file, indent=2)
+
+
+config = load_config()
 
 
 def find_ffmpeg_executable() -> str:
@@ -120,6 +144,48 @@ def get_music_state(guild_id: int) -> GuildMusicState:
     return state
 
 
+def get_music_channel_id(guild_id: int) -> Optional[int]:
+    channel_id = config["music_channels"].get(str(guild_id))
+    return int(channel_id) if channel_id else None
+
+
+def set_music_channel_id(guild_id: int, channel_id: int) -> None:
+    config["music_channels"][str(guild_id)] = channel_id
+    save_config(config)
+
+
+def get_music_output_channel(ctx: commands.Context) -> discord.abc.Messageable:
+    if not ctx.guild:
+        return ctx.channel
+
+    channel_id = get_music_channel_id(ctx.guild.id)
+    if channel_id is None:
+        return ctx.channel
+
+    return ctx.guild.get_channel(channel_id) or ctx.channel
+
+
+async def acknowledge_music_routing(ctx: commands.Context) -> bool:
+    if not ctx.guild:
+        return False
+
+    channel_id = get_music_channel_id(ctx.guild.id)
+    if channel_id is None or ctx.channel.id == channel_id:
+        return False
+
+    message = f"I'll handle that in <#{channel_id}>."
+    if ctx.interaction:
+        await ctx.send(message, ephemeral=True)
+        return True
+
+    try:
+        await ctx.message.delete()
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+        pass
+
+    return False
+
+
 async def delete_previous_bot_message(ctx: commands.Context) -> None:
     if not ctx.guild:
         return
@@ -148,7 +214,13 @@ async def delete_previous_bot_message(ctx: commands.Context) -> None:
 
 async def send_clean(ctx: commands.Context, *args, **kwargs) -> discord.Message:
     await delete_previous_bot_message(ctx)
-    message = await ctx.send(*args, **kwargs)
+    channel = get_music_output_channel(ctx)
+    ephemeral = kwargs.pop("ephemeral", False)
+
+    if channel.id == ctx.channel.id:
+        message = await ctx.send(*args, ephemeral=ephemeral, **kwargs)
+    else:
+        message = await channel.send(*args, **kwargs)
 
     if ctx.guild:
         state = get_music_state(ctx.guild.id)
@@ -371,10 +443,43 @@ async def on_ready() -> None:
 
 
 @commands.guild_only()
+@commands.has_guild_permissions(manage_channels=True)
+@bot.hybrid_command(name="setup_music_channel", description="Create or set the bot's dedicated music channel.")
+async def setup_music_channel(ctx: commands.Context, name: str = "music-bot") -> None:
+    if ctx.interaction:
+        await ctx.defer(ephemeral=True)
+
+    existing_channel_id = get_music_channel_id(ctx.guild.id)
+    channel = ctx.guild.get_channel(existing_channel_id) if existing_channel_id else None
+
+    if channel is None:
+        channel = discord.utils.get(ctx.guild.text_channels, name=name)
+
+    if channel is None:
+        channel = await ctx.guild.create_text_channel(
+            name=name,
+            reason="Dedicated music bot channel",
+        )
+
+    set_music_channel_id(ctx.guild.id, channel.id)
+
+    embed = discord.Embed(
+        title="Music Bot",
+        description="Use this channel for music commands and queue controls.",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Commands", value="`/play`, `/queue`, `/pause`, `/resume`, `/skip`, `/stop`, `/leave`")
+    await channel.send(embed=embed, view=MusicControlView())
+    await ctx.send(f"Music bot channel set to {channel.mention}.", ephemeral=bool(ctx.interaction))
+
+
+@commands.guild_only()
 @bot.hybrid_command(name="play", aliases=["p"], description="Play a YouTube URL or search term.")
 async def play(ctx: commands.Context, *, query: str) -> None:
     """Play a YouTube URL or search term."""
-    if ctx.interaction:
+    acknowledged = await acknowledge_music_routing(ctx)
+
+    if ctx.interaction and not acknowledged:
         await ctx.defer()
 
     await ensure_voice(ctx)
@@ -393,6 +498,8 @@ async def play(ctx: commands.Context, *, query: str) -> None:
 @commands.guild_only()
 @bot.hybrid_command(name="pause", description="Pause the current song.")
 async def pause(ctx: commands.Context) -> None:
+    await acknowledge_music_routing(ctx)
+
     voice_client = ctx.guild.voice_client
     if voice_client and voice_client.is_playing():
         voice_client.pause()
@@ -404,6 +511,8 @@ async def pause(ctx: commands.Context) -> None:
 @commands.guild_only()
 @bot.hybrid_command(name="resume", description="Resume the paused song.")
 async def resume(ctx: commands.Context) -> None:
+    await acknowledge_music_routing(ctx)
+
     voice_client = ctx.guild.voice_client
     if voice_client and voice_client.is_paused():
         voice_client.resume()
@@ -415,6 +524,8 @@ async def resume(ctx: commands.Context) -> None:
 @commands.guild_only()
 @bot.hybrid_command(name="skip", description="Skip the current song.")
 async def skip(ctx: commands.Context) -> None:
+    await acknowledge_music_routing(ctx)
+
     voice_client = ctx.guild.voice_client
     if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
         voice_client.stop()
@@ -426,12 +537,16 @@ async def skip(ctx: commands.Context) -> None:
 @commands.guild_only()
 @bot.hybrid_command(name="queue", aliases=["q"], description="Show the current music queue.")
 async def queue(ctx: commands.Context) -> None:
+    await acknowledge_music_routing(ctx)
+
     await send_clean(ctx, embed=build_queue_embed(ctx.guild.id), view=MusicControlView())
 
 
 @commands.guild_only()
 @bot.hybrid_command(name="stop", description="Stop playback and clear the queue.")
 async def stop(ctx: commands.Context) -> None:
+    await acknowledge_music_routing(ctx)
+
     state = get_music_state(ctx.guild.id)
 
     while not state.queue.empty():
@@ -449,6 +564,8 @@ async def stop(ctx: commands.Context) -> None:
 @commands.guild_only()
 @bot.hybrid_command(name="leave", aliases=["disconnect", "dc"], description="Disconnect from voice.")
 async def leave(ctx: commands.Context) -> None:
+    await acknowledge_music_routing(ctx)
+
     state = get_music_state(ctx.guild.id)
 
     while not state.queue.empty():

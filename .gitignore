@@ -9,6 +9,7 @@ __pycache__/
 venv/
 
 *.log
+bot_config.json
 
 .DS_Store
 Thumbs.db

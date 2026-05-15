@@ -55,6 +55,7 @@ A small Discord music bot that joins your voice channel and plays audio from You
 
 Commands work as Discord slash commands and as prefix commands.
 
+- `/setup_music_channel [name]`: create or set the dedicated music text channel
 - `/play <YouTube URL or search>` or `!play <YouTube URL or search>`: queue a song and start playback
 - `/pause` or `!pause`: pause playback
 - `/resume` or `!resume`: resume playback
@@ -64,6 +65,8 @@ Commands work as Discord slash commands and as prefix commands.
 - `/leave` or `!leave`: disconnect from voice
 
 Playback messages include buttons for play/resume, pause, stop, skip, and queue.
+
+After `/setup_music_channel`, music command output is routed to that configured channel. Slash commands used elsewhere reply privately to say where the bot will post, and prefix commands used elsewhere are deleted when possible.
 
 ## Notes
 
