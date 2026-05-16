@@ -666,6 +666,7 @@ async def dashboard_login_page(request: web.Request) -> web.Response:
 
     html = (
         DASHBOARD_LOGIN_HTML.replace("{{DISCORD_LOGIN_DISPLAY}}", "flex" if discord_oauth_enabled() else "none")
+        .replace("{{DIVIDER_DISPLAY}}", "block" if discord_oauth_enabled() and DASHBOARD_PASSWORD else "none")
         .replace("{{PASSWORD_LOGIN_DISPLAY}}", "grid" if DASHBOARD_PASSWORD else "none")
     )
     return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
@@ -1235,24 +1236,22 @@ DASHBOARD_LOGIN_HTML = """
       gap: 12px;
     }
     .discord-login {
-      min-height: 74px;
+      width: 96px;
+      height: 96px;
+      justify-self: center;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 18px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: linear-gradient(180deg, #6370ff, var(--discord));
       box-shadow: 0 0 34px rgba(88, 101, 242, 0.54), inset 0 -8px 0 rgba(0, 0, 0, 0.08);
       color: white;
       text-decoration: none;
-      font-size: clamp(20px, 5vw, 32px);
-      font-weight: 750;
-      letter-spacing: 0;
       transition: transform 120ms ease, filter 120ms ease;
     }
     .discord-login:hover { filter: brightness(1.06); transform: translateY(-1px); }
-    .discord-login svg { width: 54px; height: 54px; flex: 0 0 auto; }
+    .discord-login svg { width: 66px; height: 66px; flex: 0 0 auto; }
     .divider {
       text-align: center;
       color: var(--muted);
@@ -1273,9 +1272,8 @@ DASHBOARD_LOGIN_HTML = """
         <path fill="currentColor" d="M104.4 103.9c-5.7 0-10.2 5-10.2 11.1s4.6 11.1 10.2 11.1c5.7 0 10.3-5 10.2-11.1 0-6.1-4.5-11.1-10.2-11.1Zm36.5 0c-5.7 0-10.2 5-10.2 11.1s4.6 11.1 10.2 11.1c5.7 0 10.2-5 10.2-11.1s-4.5-11.1-10.2-11.1Z"/>
         <path fill="currentColor" d="M189.5 20h-134C44.2 20 35 29.2 35 40.6v135.2c0 11.4 9.2 20.6 20.5 20.6h113.4l-5.3-18.5 12.8 11.9 12.1 11.2 21.5 19V40.6c0-11.4-9.2-20.6-20.5-20.6Zm-38.6 130.6s-3.6-4.3-6.6-8.1c13.1-3.7 18.1-11.9 18.1-11.9-4.1 2.7-8 4.6-11.5 5.9-5 2.1-9.8 3.4-14.5 4.2-9.6 1.8-18.4 1.3-25.9-.1-5.7-1.1-10.6-2.7-14.7-4.2-2.3-.9-4.8-2-7.3-3.4-.3-.2-.6-.3-.9-.5-.2-.1-.3-.2-.4-.3-1.8-1-2.8-1.7-2.8-1.7s4.8 8 17.5 11.8c-3 3.8-6.7 8.3-6.7 8.3-22.1-.7-30.5-15.2-30.5-15.2 0-32.2 14.4-58.3 14.4-58.3 14.4-10.8 28.1-10.5 28.1-10.5l1 1.2c-18 5.2-26.3 13.1-26.3 13.1s2.2-1.2 5.9-2.8c10.7-4.7 19.2-6 22.7-6.3.6-.1 1.1-.2 1.7-.2 6.1-.8 13-1 20.2-.2 9.5 1.1 19.7 3.9 30.1 9.6 0 0-7.9-7.5-24.9-12.7l1.4-1.6s13.7-.3 28.1 10.5c0 0 14.4 26.1 14.4 58.3 0 0-8.5 14.5-30.6 15.2Z"/>
       </svg>
-      <span>Sign in with Discord</span>
     </a>
-    <div class="divider" style="display: {{DISCORD_LOGIN_DISPLAY}};">or</div>
+    <div class="divider" style="display: {{DIVIDER_DISPLAY}};">or</div>
     <div class="password-login" style="display: {{PASSWORD_LOGIN_DISPLAY}};">
       <input name="username" autocomplete="username" placeholder="Username">
       <input name="password" type="password" autocomplete="current-password" placeholder="Password">
@@ -1339,7 +1337,7 @@ DASHBOARD_HTML = """
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      padding: 18px 22px;
+      padding: 14px 22px;
       border-bottom: 1px solid var(--line);
       background: #171922;
       position: sticky;
@@ -1347,6 +1345,22 @@ DASHBOARD_HTML = """
       z-index: 1;
     }
     h1 { font-size: 20px; margin: 0; }
+    .nav-left,
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+    .view-select {
+      min-height: 34px;
+      width: 118px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #20242d;
+      color: var(--text);
+      padding: 0 8px;
+    }
     main {
       width: min(1180px, calc(100% - 28px));
       margin: 18px auto 32px;
@@ -1366,6 +1380,10 @@ DASHBOARD_HTML = """
       display: grid;
       gap: 10px;
     }
+    .dashboard-page {
+      display: grid;
+      gap: 14px;
+    }
     .admin-head {
       display: flex;
       align-items: center;
@@ -1379,8 +1397,8 @@ DASHBOARD_HTML = """
       min-width: 0;
     }
     .user-avatar {
-      width: 42px;
-      height: 42px;
+      width: 36px;
+      height: 36px;
       border-radius: 50%;
       background: #2a2e3a;
       border: 1px solid var(--line);
@@ -1534,6 +1552,8 @@ DASHBOARD_HTML = """
       padding: 6px;
     }
     @media (max-width: 780px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .header-right { width: 100%; justify-content: space-between; }
       .content { grid-template-columns: 1fr; }
       .message-row { grid-template-columns: 1fr; }
       .play-row { grid-template-columns: 1fr; }
@@ -1544,34 +1564,49 @@ DASHBOARD_HTML = """
 </head>
 <body>
   <header>
-    <h1>Disco at Discord</h1>
-    <div class="status" id="botStatus">Loading...</div>
+    <div class="nav-left">
+      <select class="view-select" id="viewSelect" onchange="setView(this.value)" aria-label="Dashboard page">
+        <option value="servers">Servers</option>
+        <option value="admin" id="adminOption" hidden>Admin</option>
+      </select>
+      <h1>Disco at Discord</h1>
+    </div>
+    <div class="header-right">
+      <div class="user-card">
+        <img class="user-avatar" id="dashboardAvatar" alt="">
+        <div>
+          <div class="status" id="botStatus">Loading...</div>
+          <div class="meta" id="dashboardUser"></div>
+        </div>
+      </div>
+      <button onclick="logoutDashboard()">Log Out</button>
+    </div>
   </header>
   <main>
-    <section class="admin">
+    <section class="dashboard-page" id="serversPage">
+      <div id="servers"></div>
+    </section>
+    <section class="admin dashboard-page" id="adminPage" style="display: none;">
       <div class="admin-head">
-        <div class="user-card">
-          <img class="user-avatar" id="dashboardAvatar" alt="">
-          <div>
-            <h3>Admin</h3>
-            <div class="meta" id="dashboardUser"></div>
-            <div class="toast" id="adminToast"></div>
-          </div>
+        <div>
+          <h3>Admin Tools</h3>
+          <div class="meta">Superuser-only controls for maintenance and logs.</div>
+          <div class="toast" id="adminToast"></div>
         </div>
         <div class="controls" id="superuserControls">
           <button onclick="updateBot()">Update From Git</button>
           <button onclick="refreshLogs()">Refresh Logs</button>
         </div>
-        <div class="controls">
-          <button onclick="logoutDashboard()">Log Out</button>
-        </div>
       </div>
       <div class="log-box" id="logBox">Logs are only visible to superusers.</div>
     </section>
-    <div id="servers"></div>
   </main>
   <script>
     const servers = document.getElementById("servers");
+    const serversPage = document.getElementById("serversPage");
+    const adminPage = document.getElementById("adminPage");
+    const viewSelect = document.getElementById("viewSelect");
+    const adminOption = document.getElementById("adminOption");
     const botStatus = document.getElementById("botStatus");
     const adminToast = document.getElementById("adminToast");
     const logBox = document.getElementById("logBox");
@@ -1592,12 +1627,26 @@ DASHBOARD_HTML = """
       })[char]);
     }
 
+    function currentView() {
+      return viewSelect.value || "servers";
+    }
+
+    function setView(view) {
+      const target = view === "admin" && !adminOption.hidden ? "admin" : "servers";
+      viewSelect.value = target;
+      serversPage.style.display = target === "servers" ? "grid" : "none";
+      adminPage.style.display = target === "admin" ? "grid" : "none";
+      if (target === "admin") {
+        refreshLogs();
+      }
+    }
+
     function serverMeta(guild) {
       const voice = guild.voice;
       const music = guild.music_channel ? "#" + guild.music_channel.name : "not configured";
       const state = voice.playing ? "playing" : voice.paused ? "paused" : voice.connected ? "connected" : "idle";
       const channel = voice.channel ? " in " + voice.channel : "";
-      return `${state}${channel} · music channel: ${music}`;
+      return `${state}${channel} - music channel: ${music}`;
     }
 
     function nowPlaying(guild) {
@@ -1704,7 +1753,7 @@ DASHBOARD_HTML = """
         end: active.selectionEnd
       } : null;
       saveDrafts();
-      botStatus.textContent = `${data.bot.name} · ${data.bot.ready ? "online" : "starting"}`;
+      botStatus.textContent = `${data.bot.name} - ${data.bot.ready ? "online" : "starting"}`;
       dashboardUser.textContent = data.user && data.user.name ? `Logged in as ${data.user.name}` : "";
       if (data.user && data.user.avatar_url) {
         dashboardAvatar.src = data.user.avatar_url;
@@ -1713,7 +1762,14 @@ DASHBOARD_HTML = """
         dashboardAvatar.removeAttribute("src");
         dashboardAvatar.style.display = "none";
       }
-      superuserControls.style.display = data.user && data.user.superuser ? "flex" : "none";
+      const isSuperuser = Boolean(data.user && data.user.superuser);
+      adminOption.hidden = !isSuperuser;
+      superuserControls.style.display = isSuperuser ? "flex" : "none";
+      if (!isSuperuser && currentView() === "admin") {
+        setView("servers");
+      } else {
+        setView(currentView());
+      }
       data.guilds.forEach(guild => guildNames[guild.id] = guild.name);
       servers.innerHTML = data.guilds.map(guild => `
         <section class="server">
@@ -1783,9 +1839,6 @@ DASHBOARD_HTML = """
       const response = await fetch("/api/status");
       const data = await response.json();
       render(data);
-      if (data.user && data.user.superuser) {
-        await refreshLogs();
-      }
     }
 
     async function refreshLogs() {
@@ -1998,6 +2051,7 @@ DASHBOARD_HTML = """
       await refresh();
     }
 
+    setView("servers");
     refresh();
     setInterval(refresh, 2500);
   </script>
