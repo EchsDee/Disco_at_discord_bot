@@ -68,6 +68,26 @@ Playback messages include buttons for play/resume, pause, stop, skip, and queue.
 
 After `/setup_music_channel`, music command output is routed to that configured channel. Slash commands used elsewhere reply privately to say where the bot will post, and prefix commands used elsewhere are deleted when possible.
 
+When the queue finishes, the bot leaves voice after `MUSIC_IDLE_TIMEOUT_SECONDS` seconds. Set it to `0` to leave immediately.
+
+## Desktop Dashboard
+
+The bot also starts a local dashboard at:
+
+```text
+http://127.0.0.1:8765
+```
+
+On Windows, it adds a tray icon named **Disco at Discord**. Use the tray menu to open the dashboard or quit the bot.
+
+Dashboard settings:
+
+- `DASHBOARD_HOST=127.0.0.1`: keep the dashboard local to your machine
+- `DASHBOARD_PORT=8765`: local dashboard port
+- `ENABLE_TRAY_ICON=1`: set to `0` to disable the tray icon
+
+The dashboard shows each server, current song, voice status, and queue. It can pause, resume, skip, stop, disconnect from voice, send a message as the bot to the configured music channel, or remove the bot from a server.
+
 ## Notes
 
 This bot streams audio with `yt-dlp` and FFmpeg. YouTube may change behavior over time, so update dependencies if playback stops working:

@@ -2,14 +2,25 @@ import asyncio
 import json
 import os
 import shlex
+import threading
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from aiohttp import web
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import yt_dlp
+
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+except ImportError:
+    pystray = None
+    Image = None
+    ImageDraw = None
 
 
 load_dotenv()
@@ -17,6 +28,10 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 CONFIG_PATH = Path("bot_config.json")
+MUSIC_IDLE_TIMEOUT_SECONDS = int(os.getenv("MUSIC_IDLE_TIMEOUT_SECONDS", "60"))
+DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8765"))
+ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN. Put it in a .env file or environment variable.")
@@ -29,6 +44,9 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 commands_synced = False
 views_registered = False
+dashboard_started = False
+tray_started = False
+dashboard_runner: Optional[web.AppRunner] = None
 
 
 YTDL_OPTIONS = {
@@ -133,6 +151,18 @@ class GuildMusicState:
         self.last_channel_id: Optional[int] = None
 
 
+class DashboardPlaybackContext:
+    def __init__(self, guild: discord.Guild, channel: Optional[discord.abc.Messageable]) -> None:
+        self.guild = guild
+        self.channel = channel
+
+    async def send(self, *args, **kwargs) -> discord.Message:
+        if self.channel is None:
+            raise commands.CommandError("Set up a music channel first with /setup_music_channel.")
+
+        return await send_clean_to_channel(self.guild.id, self.channel, *args, **kwargs)
+
+
 music_states: dict[int, GuildMusicState] = {}
 
 
@@ -186,11 +216,8 @@ async def acknowledge_music_routing(ctx: commands.Context) -> bool:
     return False
 
 
-async def delete_previous_bot_message(ctx: commands.Context) -> None:
-    if not ctx.guild:
-        return
-
-    state = get_music_state(ctx.guild.id)
+async def delete_previous_bot_message_for_guild(guild_id: int) -> None:
+    state = get_music_state(guild_id)
     if not state.last_message_id or not state.last_channel_id:
         return
 
@@ -210,6 +237,24 @@ async def delete_previous_bot_message(ctx: commands.Context) -> None:
     finally:
         state.last_message_id = None
         state.last_channel_id = None
+
+
+async def delete_previous_bot_message(ctx: commands.Context) -> None:
+    if not ctx.guild:
+        return
+
+    await delete_previous_bot_message_for_guild(ctx.guild.id)
+
+
+async def send_clean_to_channel(guild_id: int, channel: discord.abc.Messageable, *args, **kwargs) -> discord.Message:
+    await delete_previous_bot_message_for_guild(guild_id)
+    message = await channel.send(*args, **kwargs)
+
+    state = get_music_state(guild_id)
+    state.last_message_id = message.id
+    state.last_channel_id = message.channel.id
+
+    return message
 
 
 async def send_clean(ctx: commands.Context, *args, **kwargs) -> discord.Message:
@@ -325,6 +370,658 @@ class MusicControlView(discord.ui.View):
         )
 
 
+def dashboard_url() -> str:
+    return f"http://{DASHBOARD_HOST}:{DASHBOARD_PORT}"
+
+
+def track_to_payload(track: Optional[Track]) -> Optional[dict[str, str]]:
+    if track is None:
+        return None
+
+    return {
+        "title": track.title,
+        "url": track.webpage_url,
+        "requester": track.requester,
+        "thumbnail_url": track.thumbnail_url or "",
+    }
+
+
+def guild_to_payload(guild: discord.Guild) -> dict:
+    state = get_music_state(guild.id)
+    voice_client = guild.voice_client
+    music_channel_id = get_music_channel_id(guild.id)
+    music_channel = guild.get_channel(music_channel_id) if music_channel_id else None
+
+    return {
+        "id": str(guild.id),
+        "name": guild.name,
+        "icon_url": str(guild.icon.url) if guild.icon else "",
+        "music_channel": {
+            "id": str(music_channel.id),
+            "name": music_channel.name,
+        }
+        if music_channel
+        else None,
+        "voice_channels": [
+            {
+                "id": str(channel.id),
+                "name": channel.name,
+            }
+            for channel in guild.voice_channels
+        ],
+        "voice": {
+            "connected": bool(voice_client and voice_client.is_connected()),
+            "playing": bool(voice_client and voice_client.is_playing()),
+            "paused": bool(voice_client and voice_client.is_paused()),
+            "channel": voice_client.channel.name if voice_client and voice_client.channel else "",
+        },
+        "current": track_to_payload(state.current),
+        "queue": [track_to_payload(track) for track in list(state.queue._queue)],
+    }
+
+
+async def dashboard_index(request: web.Request) -> web.Response:
+    return web.Response(text=DASHBOARD_HTML, content_type="text/html")
+
+
+async def dashboard_status(request: web.Request) -> web.Response:
+    return web.json_response(
+        {
+            "bot": {
+                "name": str(bot.user) if bot.user else "Starting...",
+                "ready": bot.is_ready(),
+                "dashboard_url": dashboard_url(),
+            },
+            "guilds": [guild_to_payload(guild) for guild in bot.guilds],
+        }
+    )
+
+
+async def dashboard_control(request: web.Request) -> web.Response:
+    guild = bot.get_guild(int(request.match_info["guild_id"]))
+    if guild is None:
+        return web.json_response({"ok": False, "error": "Unknown server."}, status=404)
+
+    data = await request.json()
+    action = data.get("action")
+    state = get_music_state(guild.id)
+    voice_client = guild.voice_client
+
+    if action == "pause":
+        if voice_client and voice_client.is_playing():
+            voice_client.pause()
+            return web.json_response({"ok": True, "message": "Paused."})
+        return web.json_response({"ok": False, "error": "Nothing is playing."}, status=400)
+
+    if action == "resume":
+        if voice_client and voice_client.is_paused():
+            voice_client.resume()
+            return web.json_response({"ok": True, "message": "Resumed."})
+        return web.json_response({"ok": False, "error": "Nothing is paused."}, status=400)
+
+    if action == "skip":
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            voice_client.stop()
+            return web.json_response({"ok": True, "message": "Skipped."})
+        return web.json_response({"ok": False, "error": "Nothing is playing."}, status=400)
+
+    if action == "stop":
+        while not state.queue.empty():
+            state.queue.get_nowait()
+            state.queue.task_done()
+
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            voice_client.stop()
+
+        await bot.change_presence(activity=None)
+        return web.json_response({"ok": True, "message": "Stopped and cleared the queue."})
+
+    if action == "leave":
+        while not state.queue.empty():
+            state.queue.get_nowait()
+            state.queue.task_done()
+
+        if voice_client and voice_client.is_connected():
+            await voice_client.disconnect()
+
+        await bot.change_presence(activity=None)
+        return web.json_response({"ok": True, "message": "Disconnected."})
+
+    if action == "send_message":
+        message = str(data.get("message", "")).strip()
+        if not message:
+            return web.json_response({"ok": False, "error": "Message cannot be empty."}, status=400)
+
+        if len(message) > 2000:
+            return web.json_response({"ok": False, "error": "Discord messages are limited to 2000 characters."}, status=400)
+
+        channel_id = get_music_channel_id(guild.id)
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if channel is None:
+            return web.json_response(
+                {"ok": False, "error": "Set up a music channel first with /setup_music_channel."},
+                status=400,
+            )
+
+        await send_clean_to_channel(guild.id, channel, message)
+        return web.json_response({"ok": True, "message": f"Sent to #{channel.name}."})
+
+    if action == "play":
+        query = str(data.get("query", "")).strip()
+        if not query:
+            return web.json_response({"ok": False, "error": "Enter a YouTube URL or search."}, status=400)
+
+        channel_id = data.get("voice_channel_id")
+        voice_channel = guild.get_channel(int(channel_id)) if channel_id else None
+        if voice_channel is not None and not isinstance(voice_channel, discord.VoiceChannel):
+            voice_channel = None
+        if voice_channel is None:
+            voice_channels = guild.voice_channels
+            voice_channel = voice_channels[0] if voice_channels else None
+
+        if voice_channel is None:
+            return web.json_response({"ok": False, "error": "No voice channel found."}, status=400)
+
+        voice_client = guild.voice_client
+        if voice_client and voice_client.is_connected():
+            if voice_client.channel != voice_channel:
+                await voice_client.move_to(voice_channel)
+        else:
+            await voice_channel.connect()
+
+        track = await extract_track(query, "Dashboard")
+        await state.queue.put(track)
+
+        music_channel_id = get_music_channel_id(guild.id)
+        music_channel = guild.get_channel(music_channel_id) if music_channel_id else None
+        playback_ctx = DashboardPlaybackContext(guild, music_channel)
+        await send_clean_to_channel(guild.id, music_channel or voice_channel, f"Queued: **{track.title}**", view=MusicControlView())
+
+        if state.player_task is None or state.player_task.done():
+            state.player_task = asyncio.create_task(player_loop(playback_ctx))
+
+        return web.json_response({"ok": True, "message": f"Queued {track.title}."})
+
+    if action == "leave_server":
+        while not state.queue.empty():
+            state.queue.get_nowait()
+            state.queue.task_done()
+
+        if voice_client and voice_client.is_connected():
+            await voice_client.disconnect()
+
+        await bot.change_presence(activity=None)
+        guild_name = guild.name
+        await guild.leave()
+        return web.json_response({"ok": True, "message": f"Left {guild_name}."})
+
+    return web.json_response({"ok": False, "error": "Unknown action."}, status=400)
+
+
+async def start_dashboard() -> None:
+    global dashboard_runner
+
+    app = web.Application()
+    app.router.add_get("/", dashboard_index)
+    app.router.add_get("/api/status", dashboard_status)
+    app.router.add_post("/api/guilds/{guild_id}/control", dashboard_control)
+
+    dashboard_runner = web.AppRunner(app)
+    await dashboard_runner.setup()
+    site = web.TCPSite(dashboard_runner, DASHBOARD_HOST, DASHBOARD_PORT)
+    await site.start()
+    print(f"Dashboard running at {dashboard_url()}", flush=True)
+
+
+def make_tray_image():
+    image = Image.new("RGBA", (64, 64), (25, 28, 36, 255))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((12, 12, 52, 52), fill=(88, 101, 242, 255))
+    draw.polygon((29, 22, 29, 42, 45, 32), fill=(255, 255, 255, 255))
+    return image
+
+
+def open_dashboard_from_tray(icon=None, item=None) -> None:
+    webbrowser.open(dashboard_url())
+
+
+def quit_from_tray(icon, item=None) -> None:
+    asyncio.run_coroutine_threadsafe(bot.close(), bot.loop)
+    icon.stop()
+
+
+def start_tray_icon() -> None:
+    if not ENABLE_TRAY_ICON or pystray is None or Image is None or ImageDraw is None:
+        return
+
+    icon = pystray.Icon(
+        "Disco at Discord",
+        make_tray_image(),
+        "Disco at Discord",
+        menu=pystray.Menu(
+            pystray.MenuItem("Open Dashboard", open_dashboard_from_tray, default=True),
+            pystray.MenuItem("Quit Bot", quit_from_tray),
+        ),
+    )
+    threading.Thread(target=icon.run, daemon=True).start()
+
+
+DASHBOARD_HTML = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Disco at Discord</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #121318;
+      --panel: #1d2029;
+      --line: #333746;
+      --text: #f4f5f8;
+      --muted: #a8adbd;
+      --accent: #58c4dd;
+      --danger: #f26b6b;
+      --ok: #7ad88f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Segoe UI, system-ui, sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--line);
+      background: #171922;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    h1 { font-size: 20px; margin: 0; }
+    main {
+      width: min(1180px, calc(100% - 28px));
+      margin: 18px auto 32px;
+      display: grid;
+      gap: 14px;
+    }
+    .status { color: var(--muted); font-size: 14px; }
+    .server {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .server-head {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .server-head img {
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      background: #2a2e3a;
+    }
+    .server-title { flex: 1; min-width: 0; }
+    .server-title h2 { font-size: 16px; margin: 0 0 4px; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .content {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+      gap: 14px;
+      padding: 14px;
+    }
+    .now {
+      display: grid;
+      grid-template-columns: 96px 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+    .thumb {
+      width: 96px;
+      aspect-ratio: 1;
+      object-fit: cover;
+      border-radius: 8px;
+      background: #2a2e3a;
+    }
+    h3 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+    a { color: var(--text); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .song-title { font-weight: 650; line-height: 1.35; }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #272b36;
+      color: var(--text);
+      min-height: 34px;
+      padding: 0 12px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button.danger:hover { border-color: var(--danger); }
+    .queue {
+      display: grid;
+      gap: 8px;
+      max-height: 310px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .queue-item {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 8px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #20242d;
+    }
+    .empty {
+      color: var(--muted);
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+    .toast {
+      color: var(--muted);
+      min-height: 18px;
+      font-size: 13px;
+    }
+    .message-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .play-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(160px, 240px) auto;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    input, select {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #151821;
+      color: var(--text);
+      padding: 0 10px;
+      min-width: 0;
+    }
+    @media (max-width: 780px) {
+      .content { grid-template-columns: 1fr; }
+      .message-row { grid-template-columns: 1fr; }
+      .play-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Disco at Discord</h1>
+    <div class="status" id="botStatus">Loading...</div>
+  </header>
+  <main id="servers"></main>
+  <script>
+    const servers = document.getElementById("servers");
+    const botStatus = document.getElementById("botStatus");
+    const guildNames = {};
+    const drafts = {};
+    const selectedVoiceChannels = {};
+
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      })[char]);
+    }
+
+    function serverMeta(guild) {
+      const voice = guild.voice;
+      const music = guild.music_channel ? "#" + guild.music_channel.name : "not configured";
+      const state = voice.playing ? "playing" : voice.paused ? "paused" : voice.connected ? "connected" : "idle";
+      const channel = voice.channel ? " in " + voice.channel : "";
+      return `${state}${channel} · music channel: ${music}`;
+    }
+
+    function nowPlaying(guild) {
+      if (!guild.current) {
+        return `
+          <div class="empty">Nothing is playing.</div>
+          ${serverActions(guild)}
+        `;
+      }
+      const thumb = guild.current.thumbnail_url || "";
+      return `
+        <div class="now">
+          <img class="thumb" src="${esc(thumb)}" alt="">
+          <div>
+            <div class="song-title"><a href="${esc(guild.current.url)}" target="_blank">${esc(guild.current.title)}</a></div>
+            <div class="meta">Requested by ${esc(guild.current.requester)}</div>
+            <div class="controls">
+              <button onclick="control('${guild.id}', 'resume')">Play</button>
+              <button onclick="control('${guild.id}', 'pause')">Pause</button>
+              <button onclick="control('${guild.id}', 'skip')">Skip</button>
+              <button class="danger" onclick="control('${guild.id}', 'stop')">Stop</button>
+              <button class="danger" onclick="control('${guild.id}', 'leave')">Leave</button>
+            </div>
+            <div class="toast" id="toast-${guild.id}"></div>
+          </div>
+        </div>
+        ${serverActions(guild)}`;
+    }
+
+    function serverActions(guild) {
+      return `
+        <div class="play-row">
+          <input id="play-${guild.id}" placeholder="YouTube URL or search">
+          <select id="voice-${guild.id}">
+            ${voiceOptions(guild)}
+          </select>
+          <button onclick="playFromDashboard('${guild.id}')">Play</button>
+        </div>
+        <div class="message-row">
+          <input id="message-${guild.id}" maxlength="2000" placeholder="Send a message as the bot to ${guild.music_channel ? "#" + esc(guild.music_channel.name) : "the music channel"}">
+          <button onclick="sendBotMessage('${guild.id}')">Send</button>
+        </div>
+        <div class="controls">
+          <button class="danger" onclick="leaveServer('${guild.id}')">Remove Bot From Server</button>
+        </div>
+        <div class="toast" id="server-toast-${guild.id}"></div>
+      `;
+    }
+
+    function voiceOptions(guild) {
+      if (!guild.voice_channels.length) {
+        return `<option value="">No voice channels</option>`;
+      }
+      return guild.voice_channels.map(channel => `<option value="${channel.id}">${esc(channel.name)}</option>`).join("");
+    }
+
+    function queueList(guild) {
+      if (!guild.queue.length) {
+        return `<div class="empty">Queue is empty.</div>`;
+      }
+      return `<div class="queue">` + guild.queue.map((track, index) => `
+        <div class="queue-item">
+          <div class="meta">${index + 1}</div>
+          <div>
+            <div><a href="${esc(track.url)}" target="_blank">${esc(track.title)}</a></div>
+            <div class="meta">Requested by ${esc(track.requester)}</div>
+          </div>
+        </div>
+      `).join("") + `</div>`;
+    }
+
+    function render(data) {
+      saveDrafts();
+      botStatus.textContent = `${data.bot.name} · ${data.bot.ready ? "online" : "starting"}`;
+      data.guilds.forEach(guild => guildNames[guild.id] = guild.name);
+      servers.innerHTML = data.guilds.map(guild => `
+        <section class="server">
+          <div class="server-head">
+            ${guild.icon_url ? `<img src="${esc(guild.icon_url)}" alt="">` : `<img alt="">`}
+            <div class="server-title">
+              <h2>${esc(guild.name)}</h2>
+              <div class="meta">${esc(serverMeta(guild))}</div>
+            </div>
+          </div>
+          <div class="content">
+            <div>
+              <h3>Now Playing</h3>
+              ${nowPlaying(guild)}
+            </div>
+            <div>
+              <h3>Queue</h3>
+              ${queueList(guild)}
+            </div>
+          </div>
+        </section>
+      `).join("") || `<div class="empty">No servers available yet.</div>`;
+      restoreDrafts();
+    }
+
+    function saveDrafts() {
+      document.querySelectorAll("input[id^='play-'], input[id^='message-']").forEach(input => {
+        drafts[input.id] = input.value;
+      });
+      document.querySelectorAll("select[id^='voice-']").forEach(select => {
+        selectedVoiceChannels[select.id] = select.value;
+      });
+    }
+
+    function restoreDrafts() {
+      Object.entries(drafts).forEach(([id, value]) => {
+        const input = document.getElementById(id);
+        if (input) input.value = value;
+      });
+      Object.entries(selectedVoiceChannels).forEach(([id, value]) => {
+        const select = document.getElementById(id);
+        if (select && [...select.options].some(option => option.value === value)) {
+          select.value = value;
+        }
+      });
+    }
+
+    async function refresh() {
+      const response = await fetch("/api/status");
+      render(await response.json());
+    }
+
+    async function control(guildId, action, extra = {}) {
+      const toast = document.getElementById(`toast-${guildId}`);
+      if (toast) toast.textContent = "Working...";
+      const response = await fetch(`/api/guilds/${guildId}/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...extra })
+      });
+      const data = await response.json();
+      if (toast) toast.textContent = data.message || data.error || "";
+      await refresh();
+    }
+
+    async function sendBotMessage(guildId) {
+      const input = document.getElementById(`message-${guildId}`);
+      const toast = document.getElementById(`server-toast-${guildId}`);
+      const message = input ? input.value.trim() : "";
+      if (!message) {
+        if (toast) toast.textContent = "Write a message first.";
+        return;
+      }
+
+      if (toast) toast.textContent = "Sending...";
+      const response = await fetch(`/api/guilds/${guildId}/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "send_message", message })
+      });
+      const data = await response.json();
+      if (toast) toast.textContent = data.message || data.error || "";
+      if (response.ok && input) {
+        input.value = "";
+        drafts[input.id] = "";
+      }
+    }
+
+    async function playFromDashboard(guildId) {
+      const input = document.getElementById(`play-${guildId}`);
+      const select = document.getElementById(`voice-${guildId}`);
+      const toast = document.getElementById(`server-toast-${guildId}`);
+      const query = input ? input.value.trim() : "";
+
+      if (!query) {
+        if (toast) toast.textContent = "Enter a YouTube URL or search.";
+        return;
+      }
+
+      if (toast) toast.textContent = "Queuing...";
+      const response = await fetch(`/api/guilds/${guildId}/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "play",
+          query,
+          voice_channel_id: select ? select.value : ""
+        })
+      });
+      const data = await response.json();
+      if (toast) toast.textContent = data.message || data.error || "";
+      if (response.ok && input) {
+        input.value = "";
+        drafts[input.id] = "";
+      }
+      await refresh();
+    }
+
+    async function leaveServer(guildId) {
+      const guildName = guildNames[guildId] || "this server";
+      if (!confirm(`Remove the bot from ${guildName}? You will need to invite it again later.`)) {
+        return;
+      }
+
+      const toast = document.getElementById(`server-toast-${guildId}`);
+      if (toast) toast.textContent = "Leaving server...";
+      const response = await fetch(`/api/guilds/${guildId}/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "leave_server" })
+      });
+      const data = await response.json();
+      if (toast) toast.textContent = data.message || data.error || "";
+      await refresh();
+    }
+
+    refresh();
+    setInterval(refresh, 2500);
+  </script>
+</body>
+</html>
+"""
+
+
 async def extract_track(query: str, requester: str) -> Track:
     loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
@@ -423,14 +1120,35 @@ async def player_loop(ctx: commands.Context) -> None:
     state.player_task = None
     await bot.change_presence(activity=None)
 
+    if MUSIC_IDLE_TIMEOUT_SECONDS > 0:
+        await asyncio.sleep(MUSIC_IDLE_TIMEOUT_SECONDS)
+
+    voice_client = ctx.guild.voice_client
+    if (
+        voice_client
+        and voice_client.is_connected()
+        and not voice_client.is_playing()
+        and not voice_client.is_paused()
+        and state.queue.empty()
+    ):
+        await voice_client.disconnect()
+
 
 @bot.event
 async def on_ready() -> None:
-    global commands_synced, views_registered
+    global commands_synced, views_registered, dashboard_started, tray_started
 
     if not views_registered:
         bot.add_view(MusicControlView())
         views_registered = True
+
+    if not dashboard_started:
+        await start_dashboard()
+        dashboard_started = True
+
+    if not tray_started:
+        start_tray_icon()
+        tray_started = True
 
     if not commands_synced:
         for guild in bot.guilds:
@@ -469,7 +1187,7 @@ async def setup_music_channel(ctx: commands.Context, name: str = "music-bot") ->
         color=discord.Color.blurple(),
     )
     embed.add_field(name="Commands", value="`/play`, `/queue`, `/pause`, `/resume`, `/skip`, `/stop`, `/leave`")
-    await channel.send(embed=embed, view=MusicControlView())
+    await send_clean_to_channel(ctx.guild.id, channel, embed=embed, view=MusicControlView())
     await ctx.send(f"Music bot channel set to {channel.mention}.", ephemeral=bool(ctx.interaction))
 
 
