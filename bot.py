@@ -37,6 +37,7 @@ DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8765"))
 ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
 MAX_PLAYLIST_TRACKS = int(os.getenv("MAX_PLAYLIST_TRACKS", "50"))
+YTDL_EXTRACT_TIMEOUT_SECONDS = int(os.getenv("YTDL_EXTRACT_TIMEOUT_SECONDS", "90"))
 YTDL_COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE")
 YTDL_FORMAT = os.getenv("YTDL_FORMAT", "bestaudio/best")
 YTDL_JS_RUNTIME = os.getenv("YTDL_JS_RUNTIME")
@@ -1433,7 +1434,11 @@ def track_from_data(data: dict, query: str, requester: str) -> Track:
 async def extract_tracks(query: str, requester: str) -> list[Track]:
     loop = asyncio.get_running_loop()
     extractor = playlist_ytdl if looks_like_playlist_query(query) else ytdl
-    data = await loop.run_in_executor(None, lambda: extractor.extract_info(query, download=False))
+    print(f"Extracting media for {requester}: {query}", flush=True)
+    data = await asyncio.wait_for(
+        loop.run_in_executor(None, lambda: extractor.extract_info(query, download=False)),
+        timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
+    )
 
     if "entries" in data:
         entries = [entry for entry in data["entries"] if entry]
@@ -1441,13 +1446,16 @@ async def extract_tracks(query: str, requester: str) -> list[Track]:
             tracks = [track_from_data(entry, query, requester) for entry in entries if "url" in entry]
             if not tracks:
                 raise commands.CommandError("No playable tracks found in that playlist.")
+            print(f"Extracted playlist with {len(tracks)} tracks for {requester}", flush=True)
             return tracks
 
         if not entries:
             raise commands.CommandError("No playable tracks found.")
         data = entries[0]
 
-    return [track_from_data(data, query, requester)]
+    track = track_from_data(data, query, requester)
+    print(f"Extracted track for {requester}: {track.title}", flush=True)
+    return [track]
 
 
 async def extract_track(query: str, requester: str) -> Track:
@@ -1487,6 +1495,7 @@ async def player_loop(ctx: commands.Context) -> None:
 
     while True:
         state.current = await state.queue.get()
+        print(f"Starting playback: {state.current.title}", flush=True)
 
         voice_client = ctx.guild.voice_client
         if not voice_client or not voice_client.is_connected():
@@ -1518,6 +1527,7 @@ async def player_loop(ctx: commands.Context) -> None:
             bot.loop.call_soon_threadsafe(done.set)
 
         voice_client.play(source, after=after_play)
+        print(f"FFmpeg playback started: {state.current.title}", flush=True)
         await bot.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.listening,

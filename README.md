@@ -88,6 +88,7 @@ Dashboard settings:
 - `DASHBOARD_PORT=8765`: local dashboard port
 - `ENABLE_TRAY_ICON=1`: set to `0` to disable the tray icon
 - `MAX_PLAYLIST_TRACKS=50`: maximum songs to add from one playlist link
+- `YTDL_EXTRACT_TIMEOUT_SECONDS=90`: maximum time to wait for yt-dlp extraction
 - `YTDL_COOKIE_FILE=`: optional path to a Netscape-format YouTube cookies file for hosted servers
 - `YTDL_FORMAT=bestaudio/best`: yt-dlp format selector
 - `YTDL_JS_RUNTIME=`: optional JavaScript runtime for yt-dlp challenge solving, for example `deno`
