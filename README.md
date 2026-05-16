@@ -51,12 +51,14 @@ A small Discord music bot that joins your voice channel and plays audio from You
    python bot.py
    ```
 
+   On Windows, you can also double-click `Start Bot.bat`.
+
 ## Commands
 
 Commands work as Discord slash commands and as prefix commands.
 
 - `/setup_music_channel [name]`: create or set the dedicated music text channel
-- `/play <YouTube URL or search>` or `!play <YouTube URL or search>`: queue a song and start playback
+- `/play <YouTube URL, playlist, or search>` or `!play <YouTube URL, playlist, or search>`: queue a song or playlist and start playback
 - `/pause` or `!pause`: pause playback
 - `/resume` or `!resume`: resume playback
 - `/skip` or `!skip`: skip the current song
@@ -85,8 +87,11 @@ Dashboard settings:
 - `DASHBOARD_HOST=127.0.0.1`: keep the dashboard local to your machine
 - `DASHBOARD_PORT=8765`: local dashboard port
 - `ENABLE_TRAY_ICON=1`: set to `0` to disable the tray icon
+- `MAX_PLAYLIST_TRACKS=50`: maximum songs to add from one playlist link
 
-The dashboard shows each server, current song, voice status, and queue. It can pause, resume, skip, stop, disconnect from voice, send a message as the bot to the configured music channel, or remove the bot from a server.
+The dashboard shows each server, current song, voice status, queue, and saved soundboard. It can pause, resume, skip, stop, disconnect from voice, start music from a URL/search/playlist, save soundboard buttons from YouTube searches/URLs/playlists or uploaded local files, play saved sounds, send a message as the bot to the configured music channel, or remove the bot from a server.
+
+Uploaded soundboard files are stored in `soundboard_files/`, which is ignored by Git.
 
 ## Notes
 

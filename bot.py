@@ -2,11 +2,14 @@ import asyncio
 import json
 import os
 import shlex
+import re
 import threading
+import uuid
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 from aiohttp import web
 import discord
@@ -28,10 +31,12 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 CONFIG_PATH = Path("bot_config.json")
+SOUNDBOARD_FILES_DIR = Path("soundboard_files")
 MUSIC_IDLE_TIMEOUT_SECONDS = int(os.getenv("MUSIC_IDLE_TIMEOUT_SECONDS", "60"))
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8765"))
 ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
+MAX_PLAYLIST_TRACKS = int(os.getenv("MAX_PLAYLIST_TRACKS", "50"))
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN. Put it in a .env file or environment variable.")
@@ -64,11 +69,18 @@ FFMPEG_OPTIONS = {
 }
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+playlist_ytdl = yt_dlp.YoutubeDL(
+    {
+        **YTDL_OPTIONS,
+        "noplaylist": False,
+        "playlistend": MAX_PLAYLIST_TRACKS,
+    }
+)
 
 
-def load_config() -> dict[str, dict[str, int]]:
+def load_config() -> dict:
     if not CONFIG_PATH.exists():
-        return {"music_channels": {}}
+        return {"music_channels": {}, "soundboards": {}}
 
     try:
         with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
@@ -77,10 +89,11 @@ def load_config() -> dict[str, dict[str, int]]:
         return {"music_channels": {}}
 
     config.setdefault("music_channels", {})
+    config.setdefault("soundboards", {})
     return config
 
 
-def save_config(config: dict[str, dict[str, int]]) -> None:
+def save_config(config: dict) -> None:
     with CONFIG_PATH.open("w", encoding="utf-8") as config_file:
         json.dump(config, config_file, indent=2)
 
@@ -140,6 +153,7 @@ class Track:
     requester: str
     http_headers: dict[str, str]
     thumbnail_url: Optional[str]
+    is_local_file: bool = False
 
 
 class GuildMusicState:
@@ -184,6 +198,61 @@ def set_music_channel_id(guild_id: int, channel_id: int) -> None:
     save_config(config)
 
 
+def get_soundboard(guild_id: int) -> list[dict[str, str]]:
+    return config["soundboards"].setdefault(str(guild_id), [])
+
+
+def add_soundboard_sound(guild_id: int, name: str, query: str) -> dict[str, str]:
+    sound = {
+        "id": uuid.uuid4().hex,
+        "name": name,
+        "query": query,
+        "source_type": "youtube",
+    }
+    get_soundboard(guild_id).append(sound)
+    save_config(config)
+    return sound
+
+
+def safe_sound_filename(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._")
+    return cleaned[:80] or "sound"
+
+
+def add_soundboard_file(guild_id: int, name: str, file_path: Path) -> dict[str, str]:
+    sound = {
+        "id": uuid.uuid4().hex,
+        "name": name,
+        "query": str(file_path),
+        "source_type": "file",
+    }
+    get_soundboard(guild_id).append(sound)
+    save_config(config)
+    return sound
+
+
+def remove_soundboard_sound(guild_id: int, sound_id: str) -> Optional[dict[str, str]]:
+    sounds = get_soundboard(guild_id)
+    for index, sound in enumerate(sounds):
+        if sound["id"] == sound_id:
+            removed = sounds.pop(index)
+            if removed.get("source_type") == "file":
+                try:
+                    Path(removed["query"]).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            save_config(config)
+            return removed
+    return None
+
+
+def find_soundboard_sound(guild_id: int, sound_id: str) -> Optional[dict[str, str]]:
+    for sound in get_soundboard(guild_id):
+        if sound["id"] == sound_id:
+            return sound
+    return None
+
+
 def get_music_output_channel(ctx: commands.Context) -> discord.abc.Messageable:
     if not ctx.guild:
         return ctx.channel
@@ -221,6 +290,12 @@ async def delete_previous_bot_message_for_guild(guild_id: int) -> None:
     if not state.last_message_id or not state.last_channel_id:
         return
 
+    music_channel_id = get_music_channel_id(guild_id)
+    if music_channel_id is None or state.last_channel_id != music_channel_id:
+        state.last_message_id = None
+        state.last_channel_id = None
+        return
+
     channel = bot.get_channel(state.last_channel_id)
     if channel is None:
         try:
@@ -247,27 +322,34 @@ async def delete_previous_bot_message(ctx: commands.Context) -> None:
 
 
 async def send_clean_to_channel(guild_id: int, channel: discord.abc.Messageable, *args, **kwargs) -> discord.Message:
-    await delete_previous_bot_message_for_guild(guild_id)
+    should_clean = get_music_channel_id(guild_id) == getattr(channel, "id", None)
+    if should_clean:
+        await delete_previous_bot_message_for_guild(guild_id)
+
     message = await channel.send(*args, **kwargs)
 
-    state = get_music_state(guild_id)
-    state.last_message_id = message.id
-    state.last_channel_id = message.channel.id
+    if should_clean:
+        state = get_music_state(guild_id)
+        state.last_message_id = message.id
+        state.last_channel_id = message.channel.id
 
     return message
 
 
 async def send_clean(ctx: commands.Context, *args, **kwargs) -> discord.Message:
-    await delete_previous_bot_message(ctx)
     channel = get_music_output_channel(ctx)
     ephemeral = kwargs.pop("ephemeral", False)
+    should_clean = bool(ctx.guild and get_music_channel_id(ctx.guild.id) == getattr(channel, "id", None))
+
+    if should_clean:
+        await delete_previous_bot_message(ctx)
 
     if channel.id == ctx.channel.id:
         message = await ctx.send(*args, ephemeral=ephemeral, **kwargs)
     else:
         message = await channel.send(*args, **kwargs)
 
-    if ctx.guild:
+    if should_clean and ctx.guild:
         state = get_music_state(ctx.guild.id)
         state.last_message_id = message.id
         state.last_channel_id = message.channel.id
@@ -282,9 +364,14 @@ def build_queue_embed(guild_id: int) -> discord.Embed:
     embed = discord.Embed(title="Music Queue", color=discord.Color.blurple())
 
     if state.current:
+        current_title = (
+            f"[{state.current.title}]({state.current.webpage_url})"
+            if state.current.webpage_url
+            else state.current.title
+        )
         embed.add_field(
             name="Now playing",
-            value=f"[{state.current.title}]({state.current.webpage_url})\nRequested by {state.current.requester}",
+            value=f"{current_title}\nRequested by {state.current.requester}",
             inline=False,
         )
         if state.current.thumbnail_url:
@@ -293,7 +380,8 @@ def build_queue_embed(guild_id: int) -> discord.Embed:
     if queued_tracks:
         lines = []
         for index, track in enumerate(queued_tracks[:10], start=1):
-            lines.append(f"`{index}.` [{track.title}]({track.webpage_url}) - {track.requester}")
+            track_title = f"[{track.title}]({track.webpage_url})" if track.webpage_url else track.title
+            lines.append(f"`{index}.` {track_title} - {track.requester}")
 
         remaining = len(queued_tracks) - 10
         if remaining > 0:
@@ -383,6 +471,7 @@ def track_to_payload(track: Optional[Track]) -> Optional[dict[str, str]]:
         "url": track.webpage_url,
         "requester": track.requester,
         "thumbnail_url": track.thumbnail_url or "",
+        "is_local_file": track.is_local_file,
     }
 
 
@@ -417,6 +506,7 @@ def guild_to_payload(guild: discord.Guild) -> dict:
         },
         "current": track_to_payload(state.current),
         "queue": [track_to_payload(track) for track in list(state.queue._queue)],
+        "soundboard": get_soundboard(guild.id),
     }
 
 
@@ -442,7 +532,11 @@ async def dashboard_control(request: web.Request) -> web.Response:
     if guild is None:
         return web.json_response({"ok": False, "error": "Unknown server."}, status=404)
 
-    data = await request.json()
+    if request.content_type.startswith("multipart/"):
+        data = await request.post()
+    else:
+        data = await request.json()
+
     action = data.get("action")
     state = get_music_state(guild.id)
     voice_client = guild.voice_client
@@ -529,18 +623,126 @@ async def dashboard_control(request: web.Request) -> web.Response:
         else:
             await voice_channel.connect()
 
-        track = await extract_track(query, "Dashboard")
-        await state.queue.put(track)
+        tracks = await extract_tracks(query, "Dashboard")
+        await queue_tracks(state, tracks)
 
         music_channel_id = get_music_channel_id(guild.id)
         music_channel = guild.get_channel(music_channel_id) if music_channel_id else None
         playback_ctx = DashboardPlaybackContext(guild, music_channel)
-        await send_clean_to_channel(guild.id, music_channel or voice_channel, f"Queued: **{track.title}**", view=MusicControlView())
+        await send_clean_to_channel(
+            guild.id,
+            music_channel or voice_channel,
+            queued_tracks_message(tracks),
+            view=MusicControlView(),
+        )
 
         if state.player_task is None or state.player_task.done():
             state.player_task = asyncio.create_task(player_loop(playback_ctx))
 
-        return web.json_response({"ok": True, "message": f"Queued {track.title}."})
+        return web.json_response({"ok": True, "message": queued_tracks_message(tracks).replace("**", "")})
+
+    if action == "add_sound":
+        name = str(data.get("name", "")).strip()
+        query = str(data.get("query", "")).strip()
+
+        if not name or not query:
+            return web.json_response({"ok": False, "error": "Sound name and URL/search are required."}, status=400)
+
+        if len(name) > 40:
+            return web.json_response({"ok": False, "error": "Sound name must be 40 characters or less."}, status=400)
+
+        add_soundboard_sound(guild.id, name, query)
+        return web.json_response({"ok": True, "message": f"Added sound: {name}."})
+
+    if action == "add_sound_file":
+        name = str(data.get("name", "")).strip()
+        upload = data.get("file")
+
+        if not name or upload is None or not getattr(upload, "file", None):
+            return web.json_response({"ok": False, "error": "Sound name and file are required."}, status=400)
+
+        if len(name) > 40:
+            return web.json_response({"ok": False, "error": "Sound name must be 40 characters or less."}, status=400)
+
+        original_name = safe_sound_filename(getattr(upload, "filename", "sound"))
+        suffix = Path(original_name).suffix[:12]
+        guild_dir = SOUNDBOARD_FILES_DIR / str(guild.id)
+        guild_dir.mkdir(parents=True, exist_ok=True)
+        file_path = guild_dir / f"{uuid.uuid4().hex}{suffix}"
+
+        with file_path.open("wb") as sound_file:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                sound_file.write(chunk)
+
+        add_soundboard_file(guild.id, name, file_path)
+        return web.json_response({"ok": True, "message": f"Added file sound: {name}."})
+
+    if action == "remove_sound":
+        sound_id = str(data.get("sound_id", ""))
+        removed = remove_soundboard_sound(guild.id, sound_id)
+        if removed is None:
+            return web.json_response({"ok": False, "error": "Sound not found."}, status=404)
+
+        return web.json_response({"ok": True, "message": f"Removed sound: {removed['name']}."})
+
+    if action == "play_sound":
+        sound_id = str(data.get("sound_id", ""))
+        sound = find_soundboard_sound(guild.id, sound_id)
+        if sound is None:
+            return web.json_response({"ok": False, "error": "Sound not found."}, status=404)
+
+        query = sound["query"]
+
+        channel_id = data.get("voice_channel_id")
+        voice_channel = guild.get_channel(int(channel_id)) if channel_id else None
+        if voice_channel is not None and not isinstance(voice_channel, discord.VoiceChannel):
+            voice_channel = None
+        if voice_channel is None:
+            voice_channels = guild.voice_channels
+            voice_channel = voice_channels[0] if voice_channels else None
+
+        if voice_channel is None:
+            return web.json_response({"ok": False, "error": "No voice channel found."}, status=400)
+
+        voice_client = guild.voice_client
+        if voice_client and voice_client.is_connected():
+            if voice_client.channel != voice_channel:
+                await voice_client.move_to(voice_channel)
+        else:
+            await voice_channel.connect()
+
+        if sound.get("source_type") == "file":
+            tracks = [
+                Track(
+                    title=sound["name"],
+                    webpage_url="",
+                    stream_url=query,
+                    requester="Soundboard",
+                    http_headers={},
+                    thumbnail_url=None,
+                    is_local_file=True,
+                )
+            ]
+        else:
+            tracks = await extract_tracks(query, f"Soundboard: {sound['name']}")
+        await queue_tracks(state, tracks)
+
+        music_channel_id = get_music_channel_id(guild.id)
+        music_channel = guild.get_channel(music_channel_id) if music_channel_id else None
+        playback_ctx = DashboardPlaybackContext(guild, music_channel)
+        if len(tracks) == 1:
+            message = f"Queued sound: **{sound['name']}**"
+        else:
+            message = f"Queued sound playlist: **{sound['name']}** ({len(tracks)} tracks)"
+        await send_clean_to_channel(guild.id, music_channel or voice_channel, message, view=MusicControlView())
+
+        if state.player_task is None or state.player_task.done():
+            state.player_task = asyncio.create_task(player_loop(playback_ctx))
+
+        return web.json_response({"ok": True, "message": message.replace("**", "")})
 
     if action == "leave_server":
         while not state.queue.empty():
@@ -736,6 +938,21 @@ DASHBOARD_HTML = """
       border-radius: 8px;
       background: #20242d;
     }
+    .soundboard {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .sound-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #20242d;
+    }
     .empty {
       color: var(--muted);
       border: 1px dashed var(--line);
@@ -768,10 +985,14 @@ DASHBOARD_HTML = """
       padding: 0 10px;
       min-width: 0;
     }
+    input[type="file"] {
+      padding: 6px;
+    }
     @media (max-width: 780px) {
       .content { grid-template-columns: 1fr; }
       .message-row { grid-template-columns: 1fr; }
       .play-row { grid-template-columns: 1fr; }
+      .sound-item { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -836,7 +1057,7 @@ DASHBOARD_HTML = """
     function serverActions(guild) {
       return `
         <div class="play-row">
-          <input id="play-${guild.id}" placeholder="YouTube URL or search">
+          <input id="play-${guild.id}" placeholder="YouTube URL, playlist, or search">
           <select id="voice-${guild.id}">
             ${voiceOptions(guild)}
           </select>
@@ -845,6 +1066,16 @@ DASHBOARD_HTML = """
         <div class="message-row">
           <input id="message-${guild.id}" maxlength="2000" placeholder="Send a message as the bot to ${guild.music_channel ? "#" + esc(guild.music_channel.name) : "the music channel"}">
           <button onclick="sendBotMessage('${guild.id}')">Send</button>
+        </div>
+        <div class="play-row">
+          <input id="sound-name-${guild.id}" maxlength="40" placeholder="Sound name">
+          <input id="sound-query-${guild.id}" placeholder="YouTube URL, playlist, or search">
+          <button onclick="addSound('${guild.id}')">Add Sound</button>
+        </div>
+        <div class="play-row">
+          <input id="sound-file-name-${guild.id}" maxlength="40" placeholder="File sound name">
+          <input id="sound-file-${guild.id}" type="file" accept="audio/*,video/*">
+          <button onclick="addSoundFile('${guild.id}')">Add File</button>
         </div>
         <div class="controls">
           <button class="danger" onclick="leaveServer('${guild.id}')">Remove Bot From Server</button>
@@ -875,7 +1106,30 @@ DASHBOARD_HTML = """
       `).join("") + `</div>`;
     }
 
+    function soundboardPanel(guild) {
+      if (!guild.soundboard.length) {
+        return `<div class="empty">No saved sounds yet.</div>`;
+      }
+
+      return `<div class="soundboard">` + guild.soundboard.map(sound => `
+        <div class="sound-item">
+          <div>
+            <div class="song-title">${esc(sound.name)}</div>
+            <div class="meta">${sound.source_type === "file" ? "Local file" : esc(sound.query)}</div>
+          </div>
+          <button onclick="playSound('${guild.id}', '${sound.id}')">Play</button>
+          <button class="danger" onclick="removeSound('${guild.id}', '${sound.id}')">Remove</button>
+        </div>
+      `).join("") + `</div>`;
+    }
+
     function render(data) {
+      const active = document.activeElement;
+      const focusState = active && active.id ? {
+        id: active.id,
+        start: active.selectionStart,
+        end: active.selectionEnd
+      } : null;
       saveDrafts();
       botStatus.textContent = `${data.bot.name} · ${data.bot.ready ? "online" : "starting"}`;
       data.guilds.forEach(guild => guildNames[guild.id] = guild.name);
@@ -896,20 +1150,38 @@ DASHBOARD_HTML = """
             <div>
               <h3>Queue</h3>
               ${queueList(guild)}
+              <h3 style="margin-top: 16px;">Soundboard</h3>
+              ${soundboardPanel(guild)}
             </div>
           </div>
         </section>
       `).join("") || `<div class="empty">No servers available yet.</div>`;
       restoreDrafts();
+      restoreFocus(focusState);
     }
 
     function saveDrafts() {
-      document.querySelectorAll("input[id^='play-'], input[id^='message-']").forEach(input => {
+      document.querySelectorAll("input[id^='play-'], input[id^='message-'], input[id^='sound-name-'], input[id^='sound-query-'], input[id^='sound-file-name-']").forEach(input => {
         drafts[input.id] = input.value;
       });
       document.querySelectorAll("select[id^='voice-']").forEach(select => {
         selectedVoiceChannels[select.id] = select.value;
       });
+    }
+
+    function restoreFocus(focusState) {
+      if (!focusState) return;
+      const element = document.getElementById(focusState.id);
+      if (!element) return;
+
+      element.focus();
+      if (
+        typeof element.setSelectionRange === "function" &&
+        typeof focusState.start === "number" &&
+        typeof focusState.end === "number"
+      ) {
+        element.setSelectionRange(focusState.start, focusState.end);
+      }
     }
 
     function restoreDrafts() {
@@ -996,6 +1268,104 @@ DASHBOARD_HTML = """
       await refresh();
     }
 
+    async function addSound(guildId) {
+      const nameInput = document.getElementById(`sound-name-${guildId}`);
+      const queryInput = document.getElementById(`sound-query-${guildId}`);
+      const toast = document.getElementById(`server-toast-${guildId}`);
+      const name = nameInput ? nameInput.value.trim() : "";
+      const query = queryInput ? queryInput.value.trim() : "";
+
+      if (!name || !query) {
+        if (toast) toast.textContent = "Add a sound name and URL/search.";
+        return;
+      }
+
+      if (toast) toast.textContent = "Adding sound...";
+      const response = await fetch(`/api/guilds/${guildId}/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add_sound", name, query })
+      });
+      const data = await response.json();
+      if (toast) toast.textContent = data.message || data.error || "";
+      if (response.ok) {
+        if (nameInput) {
+          nameInput.value = "";
+          drafts[nameInput.id] = "";
+        }
+        if (queryInput) {
+          queryInput.value = "";
+          drafts[queryInput.id] = "";
+        }
+      }
+      await refresh();
+    }
+
+    async function addSoundFile(guildId) {
+      const nameInput = document.getElementById(`sound-file-name-${guildId}`);
+      const fileInput = document.getElementById(`sound-file-${guildId}`);
+      const toast = document.getElementById(`server-toast-${guildId}`);
+      const name = nameInput ? nameInput.value.trim() : "";
+      const file = fileInput && fileInput.files.length ? fileInput.files[0] : null;
+
+      if (!name || !file) {
+        if (toast) toast.textContent = "Add a file sound name and choose a file.";
+        return;
+      }
+
+      const form = new FormData();
+      form.append("action", "add_sound_file");
+      form.append("name", name);
+      form.append("file", file);
+
+      if (toast) toast.textContent = "Uploading sound...";
+      const response = await fetch(`/api/guilds/${guildId}/control`, {
+        method: "POST",
+        body: form
+      });
+      const data = await response.json();
+      if (toast) toast.textContent = data.message || data.error || "";
+      if (response.ok) {
+        if (nameInput) {
+          nameInput.value = "";
+          drafts[nameInput.id] = "";
+        }
+        if (fileInput) fileInput.value = "";
+      }
+      await refresh();
+    }
+
+    async function playSound(guildId, soundId) {
+      const select = document.getElementById(`voice-${guildId}`);
+      const toast = document.getElementById(`server-toast-${guildId}`);
+      if (toast) toast.textContent = "Queuing sound...";
+      const response = await fetch(`/api/guilds/${guildId}/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "play_sound",
+          sound_id: soundId,
+          voice_channel_id: select ? select.value : ""
+        })
+      });
+      const data = await response.json();
+      if (toast) toast.textContent = data.message || data.error || "";
+      await refresh();
+    }
+
+    async function removeSound(guildId, soundId) {
+      const toast = document.getElementById(`server-toast-${guildId}`);
+      if (toast) toast.textContent = "Removing sound...";
+      const response = await fetch(`/api/guilds/${guildId}/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "remove_sound", sound_id: soundId })
+      });
+      const data = await response.json();
+      if (toast) toast.textContent = data.message || data.error || "";
+      await refresh();
+    }
+
     async function leaveServer(guildId) {
       const guildName = guildNames[guildId] || "this server";
       if (!confirm(`Remove the bot from ${guildName}? You will need to invite it again later.`)) {
@@ -1022,13 +1392,16 @@ DASHBOARD_HTML = """
 """
 
 
-async def extract_track(query: str, requester: str) -> Track:
-    loop = asyncio.get_running_loop()
-    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
+def looks_like_playlist_query(query: str) -> bool:
+    parsed = urlparse(query)
+    if not parsed.scheme or not parsed.netloc:
+        return False
 
-    if "entries" in data:
-        data = data["entries"][0]
+    query_values = parse_qs(parsed.query)
+    return "list" in query_values or "/playlist" in parsed.path
 
+
+def track_from_data(data: dict, query: str, requester: str) -> Track:
     thumbnail_url = data.get("thumbnail")
     thumbnails = data.get("thumbnails") or []
     if thumbnails:
@@ -1042,6 +1415,43 @@ async def extract_track(query: str, requester: str) -> Track:
         http_headers=data.get("http_headers") or {},
         thumbnail_url=thumbnail_url,
     )
+
+
+async def extract_tracks(query: str, requester: str) -> list[Track]:
+    loop = asyncio.get_running_loop()
+    extractor = playlist_ytdl if looks_like_playlist_query(query) else ytdl
+    data = await loop.run_in_executor(None, lambda: extractor.extract_info(query, download=False))
+
+    if "entries" in data:
+        entries = [entry for entry in data["entries"] if entry]
+        if looks_like_playlist_query(query):
+            tracks = [track_from_data(entry, query, requester) for entry in entries if "url" in entry]
+            if not tracks:
+                raise commands.CommandError("No playable tracks found in that playlist.")
+            return tracks
+
+        if not entries:
+            raise commands.CommandError("No playable tracks found.")
+        data = entries[0]
+
+    return [track_from_data(data, query, requester)]
+
+
+async def extract_track(query: str, requester: str) -> Track:
+    tracks = await extract_tracks(query, requester)
+    return tracks[0]
+
+
+async def queue_tracks(state: GuildMusicState, tracks: list[Track]) -> None:
+    for track in tracks:
+        await state.queue.put(track)
+
+
+def queued_tracks_message(tracks: list[Track]) -> str:
+    if len(tracks) == 1:
+        return f"Queued: **{tracks[0].title}**"
+
+    return f"Queued **{len(tracks)}** playlist tracks. First up: **{tracks[0].title}**"
 
 
 async def ensure_voice(ctx: commands.Context) -> discord.VoiceClient:
@@ -1071,10 +1481,11 @@ async def player_loop(ctx: commands.Context) -> None:
             continue
 
         try:
+            before_options = None if state.current.is_local_file else build_ffmpeg_before_options(state.current.http_headers)
             source = discord.FFmpegPCMAudio(
                 state.current.stream_url,
                 executable=FFMPEG_EXECUTABLE,
-                before_options=build_ffmpeg_before_options(state.current.http_headers),
+                before_options=before_options,
                 **FFMPEG_OPTIONS,
             )
         except Exception as exc:
@@ -1102,7 +1513,7 @@ async def player_loop(ctx: commands.Context) -> None:
         )
         embed = discord.Embed(
             title="Now playing",
-            description=f"[{state.current.title}]({state.current.webpage_url})",
+            description=f"[{state.current.title}]({state.current.webpage_url})" if state.current.webpage_url else state.current.title,
             color=discord.Color.green(),
         )
         if state.current.thumbnail_url:
@@ -1204,10 +1615,10 @@ async def play(ctx: commands.Context, *, query: str) -> None:
     state = get_music_state(ctx.guild.id)
 
     async with ctx.typing():
-        track = await extract_track(query, str(ctx.author.display_name))
-        await state.queue.put(track)
+        tracks = await extract_tracks(query, str(ctx.author.display_name))
+        await queue_tracks(state, tracks)
 
-    await send_clean(ctx, f"Queued: **{track.title}**", view=MusicControlView())
+    await send_clean(ctx, queued_tracks_message(tracks), view=MusicControlView())
 
     if state.player_task is None or state.player_task.done():
         state.player_task = asyncio.create_task(player_loop(ctx))

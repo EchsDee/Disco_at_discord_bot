@@ -10,6 +10,7 @@ venv/
 
 *.log
 bot_config.json
+soundboard_files/
 
 .DS_Store
 Thumbs.db
