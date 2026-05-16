@@ -6,6 +6,7 @@ packages:
   - git
   - ffmpeg
   - python3
+  - python3-full
   - python3-pip
   - python3-venv
 
@@ -44,8 +45,8 @@ runcmd:
   - chown -R discobot:discobot /opt/disco-at-discord
   - sudo -u discobot git clone https://github.com/EchsDee/Disco_at_discord_bot.git /opt/disco-at-discord
   - sudo -u discobot python3 -m venv /opt/disco-at-discord/.venv
-  - sudo -u discobot /opt/disco-at-discord/.venv/bin/pip install --upgrade pip
-  - sudo -u discobot /opt/disco-at-discord/.venv/bin/pip install -r /opt/disco-at-discord/requirements.txt
+  - sudo -u discobot /opt/disco-at-discord/.venv/bin/python -m pip install --upgrade pip
+  - sudo -u discobot /opt/disco-at-discord/.venv/bin/python -m pip install -r /opt/disco-at-discord/requirements.txt
   - |
     cat >/opt/disco-at-discord/.env <<'EOF'
     DISCORD_TOKEN=PASTE_YOUR_DISCORD_BOT_TOKEN_HERE

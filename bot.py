@@ -20,7 +20,7 @@ import yt_dlp
 try:
     import pystray
     from PIL import Image, ImageDraw
-except ImportError:
+except Exception:
     pystray = None
     Image = None
     ImageDraw = None
