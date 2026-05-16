@@ -3,9 +3,12 @@ import json
 import os
 import shlex
 import re
+import subprocess
 import threading
+import time
 import uuid
 import webbrowser
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -56,6 +59,14 @@ views_registered = False
 dashboard_started = False
 tray_started = False
 dashboard_runner: Optional[web.AppRunner] = None
+recent_logs: deque[str] = deque(maxlen=200)
+
+
+def log_event(message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] {message}"
+    recent_logs.append(line)
+    print(line, flush=True)
 
 
 YTDL_OPTIONS = {
@@ -536,6 +547,50 @@ async def dashboard_status(request: web.Request) -> web.Response:
     )
 
 
+async def dashboard_logs(request: web.Request) -> web.Response:
+    return web.json_response({"logs": list(recent_logs)})
+
+
+async def dashboard_update_bot(request: web.Request) -> web.Response:
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "pull", "--ff-only"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except subprocess.TimeoutExpired:
+        log_event("Git update timed out.")
+        return web.json_response({"ok": False, "error": "Git update timed out."}, status=504)
+    except OSError as exc:
+        log_event(f"Git update failed: {exc}")
+        return web.json_response({"ok": False, "error": f"Could not run git: {exc}"}, status=500)
+
+    output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    output = output or "No output."
+
+    if result.returncode != 0:
+        log_event(f"Git update failed with exit code {result.returncode}: {output}")
+        return web.json_response({"ok": False, "error": output}, status=500)
+
+    log_event(f"Git update completed: {output}")
+    updated = "Already up to date." not in output
+    if updated:
+        log_event("Update changed files; restarting bot process.")
+        bot.loop.call_later(2, lambda: os._exit(0))
+
+    return web.json_response(
+        {
+            "ok": True,
+            "message": "Updated from Git. Restarting..." if updated else "Already up to date.",
+            "output": output,
+            "restarting": updated,
+        }
+    )
+
+
 async def dashboard_control(request: web.Request) -> web.Response:
     guild = bot.get_guild(int(request.match_info["guild_id"]))
     if guild is None:
@@ -781,13 +836,15 @@ async def start_dashboard() -> None:
     app = web.Application()
     app.router.add_get("/", dashboard_index)
     app.router.add_get("/api/status", dashboard_status)
+    app.router.add_get("/api/logs", dashboard_logs)
+    app.router.add_post("/api/update", dashboard_update_bot)
     app.router.add_post("/api/guilds/{guild_id}/control", dashboard_control)
 
     dashboard_runner = web.AppRunner(app)
     await dashboard_runner.setup()
     site = web.TCPSite(dashboard_runner, DASHBOARD_HOST, DASHBOARD_PORT)
     await site.start()
-    print(f"Dashboard running at {dashboard_url()}", flush=True)
+    log_event(f"Dashboard running at {dashboard_url()}")
 
 
 def make_tray_image():
@@ -868,7 +925,36 @@ DASHBOARD_HTML = """
       display: grid;
       gap: 14px;
     }
+    #servers {
+      display: grid;
+      gap: 14px;
+    }
     .status { color: var(--muted); font-size: 14px; }
+    .admin {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+    .admin-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .log-box {
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #10131a;
+      padding: 10px;
+      color: var(--muted);
+      font: 12px/1.45 Consolas, ui-monospace, monospace;
+      white-space: pre-wrap;
+    }
     .server {
       border: 1px solid var(--line);
       background: var(--panel);
@@ -1016,10 +1102,27 @@ DASHBOARD_HTML = """
     <h1>Disco at Discord</h1>
     <div class="status" id="botStatus">Loading...</div>
   </header>
-  <main id="servers"></main>
+  <main>
+    <section class="admin">
+      <div class="admin-head">
+        <div>
+          <h3>Admin</h3>
+          <div class="toast" id="adminToast"></div>
+        </div>
+        <div class="controls">
+          <button onclick="updateBot()">Update From Git</button>
+          <button onclick="refreshLogs()">Refresh Logs</button>
+        </div>
+      </div>
+      <div class="log-box" id="logBox">Loading logs...</div>
+    </section>
+    <div id="servers"></div>
+  </main>
   <script>
     const servers = document.getElementById("servers");
     const botStatus = document.getElementById("botStatus");
+    const adminToast = document.getElementById("adminToast");
+    const logBox = document.getElementById("logBox");
     const guildNames = {};
     const drafts = {};
     const selectedVoiceChannels = {};
@@ -1215,6 +1318,26 @@ DASHBOARD_HTML = """
     async function refresh() {
       const response = await fetch("/api/status");
       render(await response.json());
+      await refreshLogs();
+    }
+
+    async function refreshLogs() {
+      const response = await fetch("/api/logs");
+      const data = await response.json();
+      logBox.textContent = data.logs.length ? data.logs.join("\\n") : "No dashboard logs yet.";
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    async function updateBot() {
+      if (!confirm("Update the bot from Git and restart if files changed?")) return;
+      adminToast.textContent = "Updating from Git...";
+      const response = await fetch("/api/update", { method: "POST" });
+      const data = await response.json();
+      adminToast.textContent = data.message || data.error || "";
+      if (data.output) {
+        logBox.textContent += `\\n${data.output}`;
+        logBox.scrollTop = logBox.scrollHeight;
+      }
     }
 
     async function control(guildId, action, extra = {}) {
@@ -1435,7 +1558,7 @@ def track_from_data(data: dict, query: str, requester: str) -> Track:
 async def extract_tracks(query: str, requester: str) -> list[Track]:
     loop = asyncio.get_running_loop()
     extractor = playlist_ytdl if looks_like_playlist_query(query) else ytdl
-    print(f"Extracting media for {requester}: {query}", flush=True)
+    log_event(f"Extracting media for {requester}: {query}")
     data = await asyncio.wait_for(
         loop.run_in_executor(None, lambda: extractor.extract_info(query, download=False)),
         timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
@@ -1450,7 +1573,7 @@ async def extract_tracks(query: str, requester: str) -> list[Track]:
                 if not entry_url:
                     continue
 
-                print(f"Extracting playlist item {index}/{len(entries)} for {requester}: {entry_url}", flush=True)
+                log_event(f"Extracting playlist item {index}/{len(entries)} for {requester}: {entry_url}")
                 item_data = await asyncio.wait_for(
                     loop.run_in_executor(None, lambda item_url=entry_url: ytdl.extract_info(item_url, download=False)),
                     timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
@@ -1459,7 +1582,7 @@ async def extract_tracks(query: str, requester: str) -> list[Track]:
 
             if not tracks:
                 raise commands.CommandError("No playable tracks found in that playlist.")
-            print(f"Extracted playlist with {len(tracks)} tracks for {requester}", flush=True)
+            log_event(f"Extracted playlist with {len(tracks)} tracks for {requester}")
             return tracks
 
         if not entries:
@@ -1467,7 +1590,7 @@ async def extract_tracks(query: str, requester: str) -> list[Track]:
         data = entries[0]
 
     track = track_from_data(data, query, requester)
-    print(f"Extracted track for {requester}: {track.title}", flush=True)
+    log_event(f"Extracted track for {requester}: {track.title}")
     return [track]
 
 
@@ -1508,7 +1631,7 @@ async def player_loop(ctx: commands.Context) -> None:
 
     while True:
         state.current = await state.queue.get()
-        print(f"Starting playback: {state.current.title}", flush=True)
+        log_event(f"Starting playback: {state.current.title}")
 
         voice_client = ctx.guild.voice_client
         if not voice_client or not voice_client.is_connected():
@@ -1532,7 +1655,7 @@ async def player_loop(ctx: commands.Context) -> None:
 
         def after_play(error: Optional[Exception]) -> None:
             if error:
-                print(f"Playback error: {error}")
+                log_event(f"Playback error: {error}")
                 asyncio.run_coroutine_threadsafe(
                     send_clean(ctx, f"Playback error: `{error}`"),
                     bot.loop,
@@ -1540,7 +1663,7 @@ async def player_loop(ctx: commands.Context) -> None:
             bot.loop.call_soon_threadsafe(done.set)
 
         voice_client.play(source, after=after_play)
-        print(f"FFmpeg playback started: {state.current.title}", flush=True)
+        log_event(f"FFmpeg playback started: {state.current.title}")
         await bot.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.listening,
@@ -1601,10 +1724,10 @@ async def on_ready() -> None:
         for guild in bot.guilds:
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
-            print(f"Synced {len(synced)} slash commands to {guild.name} ({guild.id})", flush=True)
+            log_event(f"Synced {len(synced)} slash commands to {guild.name} ({guild.id})")
         commands_synced = True
 
-    print(f"Logged in as {bot.user} (prefix: {COMMAND_PREFIX})", flush=True)
+    log_event(f"Logged in as {bot.user} (prefix: {COMMAND_PREFIX})")
 
 
 @commands.guild_only()

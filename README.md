@@ -93,7 +93,7 @@ Dashboard settings:
 - `YTDL_FORMAT=bestaudio/best`: yt-dlp format selector
 - `YTDL_JS_RUNTIME=`: optional JavaScript runtime for yt-dlp challenge solving, for example `deno`
 
-The dashboard shows each server, current song, voice status, queue, and saved soundboard. It can pause, resume, skip, stop, disconnect from voice, start music from a URL/search/playlist, save soundboard buttons from YouTube searches/URLs/playlists or uploaded local files, play saved sounds, send a message as the bot to the configured music channel, or remove the bot from a server.
+The dashboard shows each server, current song, voice status, queue, saved soundboard, and recent bot logs. It can pause, resume, skip, stop, disconnect from voice, start music from a URL/search/playlist, save soundboard buttons from YouTube searches/URLs/playlists or uploaded local files, play saved sounds, send a message as the bot to the configured music channel, update the bot from Git, or remove the bot from a server.
 
 Uploaded soundboard files are stored in `soundboard_files/`, which is ignored by Git.
 
