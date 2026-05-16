@@ -682,6 +682,7 @@ async def dashboard_login(request: web.Request) -> web.Response:
             }
         ),
         httponly=True,
+        path="/",
         samesite="Strict",
         max_age=60 * 60 * 24 * 30,
     )
@@ -704,7 +705,7 @@ async def dashboard_discord_start(request: web.Request) -> web.Response:
         }
     )
     response = web.HTTPFound(f"https://discord.com/oauth2/authorize?{params}")
-    response.set_cookie("dashboard_oauth_state", sign_value(state), httponly=True, samesite="Lax", max_age=600)
+    response.set_cookie("dashboard_oauth_state", sign_value(state), httponly=True, path="/", samesite="Lax", max_age=600)
     raise response
 
 
@@ -774,17 +775,18 @@ async def dashboard_discord_callback(request: web.Request) -> web.Response:
             }
         ),
         httponly=True,
+        path="/",
         samesite="Strict",
         max_age=60 * 60 * 24 * 30,
     )
-    response.del_cookie("dashboard_oauth_state")
+    response.del_cookie("dashboard_oauth_state", path="/")
     log_event(f"Discord dashboard login succeeded for {display_name} ({discord_user_id}).")
     raise response
 
 
 async def dashboard_logout(request: web.Request) -> web.Response:
     response = web.json_response({"ok": True, "message": "Logged out."})
-    response.del_cookie("dashboard_session")
+    response.del_cookie("dashboard_session", path="/")
     return response
 
 
