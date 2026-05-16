@@ -9,6 +9,7 @@ packages:
   - python3-full
   - python3-pip
   - python3-venv
+  - unzip
 
 users:
   - default
@@ -59,6 +60,7 @@ runcmd:
     MAX_PLAYLIST_TRACKS=50
     YTDL_COOKIE_FILE=
     YTDL_FORMAT=bestaudio/best
+    YTDL_JS_RUNTIME=
     EOF
   - chown discobot:discobot /opt/disco-at-discord/.env
   - chmod 600 /opt/disco-at-discord/.env

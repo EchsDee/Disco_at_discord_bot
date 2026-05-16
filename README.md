@@ -90,6 +90,7 @@ Dashboard settings:
 - `MAX_PLAYLIST_TRACKS=50`: maximum songs to add from one playlist link
 - `YTDL_COOKIE_FILE=`: optional path to a Netscape-format YouTube cookies file for hosted servers
 - `YTDL_FORMAT=bestaudio/best`: yt-dlp format selector
+- `YTDL_JS_RUNTIME=`: optional JavaScript runtime for yt-dlp challenge solving, for example `deno`
 
 The dashboard shows each server, current song, voice status, queue, and saved soundboard. It can pause, resume, skip, stop, disconnect from voice, start music from a URL/search/playlist, save soundboard buttons from YouTube searches/URLs/playlists or uploaded local files, play saved sounds, send a message as the bot to the configured music channel, or remove the bot from a server.
 

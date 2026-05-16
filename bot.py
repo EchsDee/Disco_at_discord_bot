@@ -39,6 +39,7 @@ ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
 MAX_PLAYLIST_TRACKS = int(os.getenv("MAX_PLAYLIST_TRACKS", "50"))
 YTDL_COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE")
 YTDL_FORMAT = os.getenv("YTDL_FORMAT", "bestaudio/best")
+YTDL_JS_RUNTIME = os.getenv("YTDL_JS_RUNTIME")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN. Put it in a .env file or environment variable.")
@@ -67,6 +68,8 @@ YTDL_OPTIONS = {
 }
 if YTDL_COOKIE_FILE:
     YTDL_OPTIONS["cookiefile"] = YTDL_COOKIE_FILE
+if YTDL_JS_RUNTIME:
+    YTDL_OPTIONS["js_runtimes"] = YTDL_JS_RUNTIME
 
 FFMPEG_OPTIONS = {
     "options": "-vn",
