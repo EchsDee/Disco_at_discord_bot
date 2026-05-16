@@ -75,6 +75,7 @@ dashboard_started = False
 tray_started = False
 dashboard_runner: Optional[web.AppRunner] = None
 recent_logs: deque[str] = deque(maxlen=200)
+dashboard_login_user_records: dict[str, dict] = {}
 
 
 def log_event(message: str) -> None:
@@ -82,6 +83,19 @@ def log_event(message: str) -> None:
     line = f"[{timestamp}] {message}"
     recent_logs.append(line)
     print(line, flush=True)
+
+
+def record_dashboard_login(user: dict) -> None:
+    user_id = str(user.get("id") or "unknown")
+    dashboard_login_user_records[user_id] = {
+        "id": user_id,
+        "name": user.get("name", user_id),
+        "avatar_url": user.get("avatar_url", ""),
+        "type": user.get("type", "unknown"),
+        "superuser": bool(user.get("superuser")),
+        "guild_count": "all" if user.get("guild_ids") == "all" else len(user.get("guild_ids") or []),
+        "last_login": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 def dashboard_auth_enabled() -> bool:
@@ -684,24 +698,24 @@ async def dashboard_login(request: web.Request) -> web.Response:
         log_event("Dashboard login failed.")
         return web.json_response({"ok": False, "error": "Invalid username or password."}, status=401)
 
+    login_user = {
+        "type": "password",
+        "id": "password",
+        "name": username,
+        "avatar_url": "",
+        "superuser": True,
+        "guild_ids": "all",
+    }
     response = web.json_response({"ok": True, "message": "Logged in."})
     response.set_cookie(
         "dashboard_session",
-        make_dashboard_session(
-            {
-                "type": "password",
-                "id": "password",
-                "name": username,
-                "avatar_url": "",
-                "superuser": True,
-                "guild_ids": "all",
-            }
-        ),
+        make_dashboard_session(login_user),
         httponly=True,
         path="/",
         samesite="Strict",
         max_age=60 * 60 * 24 * 30,
     )
+    record_dashboard_login(login_user)
     log_event(f"Dashboard login succeeded for {username}.")
     return response
 
@@ -779,25 +793,25 @@ async def dashboard_discord_callback(request: web.Request) -> web.Response:
 
     display_name = user_data.get("global_name") or user_data.get("username") or discord_user_id
     avatar_url = discord_avatar_url(user_data)
+    login_user = {
+        "type": "discord",
+        "id": discord_user_id,
+        "name": display_name,
+        "avatar_url": avatar_url,
+        "superuser": superuser,
+        "guild_ids": "all" if superuser else allowed_guild_ids,
+    }
     response = web.HTTPFound("/")
     response.set_cookie(
         "dashboard_session",
-        make_dashboard_session(
-            {
-                "type": "discord",
-                "id": discord_user_id,
-                "name": display_name,
-                "avatar_url": avatar_url,
-                "superuser": superuser,
-                "guild_ids": "all" if superuser else allowed_guild_ids,
-            }
-        ),
+        make_dashboard_session(login_user),
         httponly=True,
         path="/",
         samesite="Strict",
         max_age=60 * 60 * 24 * 30,
     )
     response.del_cookie("dashboard_oauth_state", path="/")
+    record_dashboard_login(login_user)
     log_event(f"Discord dashboard login succeeded for {display_name} ({discord_user_id}).")
     raise response
 
@@ -832,6 +846,18 @@ async def dashboard_logs(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "Superuser access required."}, status=403)
 
     return web.json_response({"logs": list(recent_logs)})
+
+
+async def dashboard_login_users(request: web.Request) -> web.Response:
+    if not dashboard_user_is_superuser(request):
+        return web.json_response({"ok": False, "error": "Superuser access required."}, status=403)
+
+    users = sorted(
+        dashboard_login_user_records.values(),
+        key=lambda user: user.get("last_login", ""),
+        reverse=True,
+    )
+    return web.json_response({"users": users})
 
 
 async def dashboard_update_bot(request: web.Request) -> web.Response:
@@ -1130,6 +1156,7 @@ async def start_dashboard() -> None:
     app.router.add_post("/api/logout", dashboard_logout)
     app.router.add_get("/api/status", dashboard_status)
     app.router.add_get("/api/logs", dashboard_logs)
+    app.router.add_get("/api/login-users", dashboard_login_users)
     app.router.add_post("/api/update", dashboard_update_bot)
     app.router.add_post("/api/guilds/{guild_id}/control", dashboard_control)
 
@@ -1417,6 +1444,27 @@ DASHBOARD_HTML = """
       font: 12px/1.45 Consolas, ui-monospace, monospace;
       white-space: pre-wrap;
     }
+    .login-users {
+      display: grid;
+      gap: 8px;
+    }
+    .login-user {
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #20242d;
+    }
+    .login-user img {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      object-fit: cover;
+      background: #2a2e3a;
+    }
     .server {
       border: 1px solid var(--line);
       background: var(--panel);
@@ -1596,8 +1644,12 @@ DASHBOARD_HTML = """
         <div class="controls" id="superuserControls">
           <button onclick="updateBot()">Update From Git</button>
           <button onclick="refreshLogs()">Refresh Logs</button>
+          <button onclick="refreshLoginUsers()">Refresh Users</button>
         </div>
       </div>
+      <h3>Dashboard Logins</h3>
+      <div class="login-users" id="loginUsers">Only superusers can see dashboard logins.</div>
+      <h3>Logs</h3>
       <div class="log-box" id="logBox">Logs are only visible to superusers.</div>
     </section>
   </main>
@@ -1610,6 +1662,7 @@ DASHBOARD_HTML = """
     const botStatus = document.getElementById("botStatus");
     const adminToast = document.getElementById("adminToast");
     const logBox = document.getElementById("logBox");
+    const loginUsers = document.getElementById("loginUsers");
     const dashboardUser = document.getElementById("dashboardUser");
     const dashboardAvatar = document.getElementById("dashboardAvatar");
     const superuserControls = document.getElementById("superuserControls");
@@ -1638,6 +1691,7 @@ DASHBOARD_HTML = """
       adminPage.style.display = target === "admin" ? "grid" : "none";
       if (target === "admin") {
         refreshLogs();
+        refreshLoginUsers();
       }
     }
 
@@ -1850,6 +1904,30 @@ DASHBOARD_HTML = """
       const data = await response.json();
       logBox.textContent = data.logs.length ? data.logs.join("\\n") : "No dashboard logs yet.";
       logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    async function refreshLoginUsers() {
+      const response = await fetch("/api/login-users");
+      if (response.status === 403) {
+        loginUsers.textContent = "Only superusers can see dashboard logins.";
+        return;
+      }
+      const data = await response.json();
+      if (!data.users.length) {
+        loginUsers.innerHTML = `<div class="empty">No dashboard logins recorded since the bot started.</div>`;
+        return;
+      }
+
+      loginUsers.innerHTML = data.users.map(user => `
+        <div class="login-user">
+          ${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : `<img alt="">`}
+          <div>
+            <div class="song-title">${esc(user.name)}</div>
+            <div class="meta">${esc(user.type)} - ${esc(user.id)} - ${user.superuser ? "superuser" : "server admin"} - servers: ${esc(user.guild_count)}</div>
+            <div class="meta">Last login: ${esc(user.last_login)}</div>
+          </div>
+        </div>
+      `).join("");
     }
 
     async function updateBot() {
