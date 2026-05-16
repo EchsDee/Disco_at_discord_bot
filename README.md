@@ -88,6 +88,7 @@ Dashboard settings:
 - `DASHBOARD_PORT=8765`: local dashboard port
 - `ENABLE_TRAY_ICON=1`: set to `0` to disable the tray icon
 - `MAX_PLAYLIST_TRACKS=50`: maximum songs to add from one playlist link
+- `YTDL_COOKIE_FILE=`: optional path to a Netscape-format YouTube cookies file for hosted servers
 
 The dashboard shows each server, current song, voice status, queue, and saved soundboard. It can pause, resume, skip, stop, disconnect from voice, start music from a URL/search/playlist, save soundboard buttons from YouTube searches/URLs/playlists or uploaded local files, play saved sounds, send a message as the bot to the configured music channel, or remove the bot from a server.
 

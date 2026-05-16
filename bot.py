@@ -37,6 +37,7 @@ DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8765"))
 ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
 MAX_PLAYLIST_TRACKS = int(os.getenv("MAX_PLAYLIST_TRACKS", "50"))
+YTDL_COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN. Put it in a .env file or environment variable.")
@@ -63,6 +64,8 @@ YTDL_OPTIONS = {
     "extract_flat": False,
     "source_address": "0.0.0.0",
 }
+if YTDL_COOKIE_FILE:
+    YTDL_OPTIONS["cookiefile"] = YTDL_COOKIE_FILE
 
 FFMPEG_OPTIONS = {
     "options": "-vn",
