@@ -69,7 +69,7 @@ YTDL_OPTIONS = {
 if YTDL_COOKIE_FILE:
     YTDL_OPTIONS["cookiefile"] = YTDL_COOKIE_FILE
 if YTDL_JS_RUNTIME:
-    YTDL_OPTIONS["js_runtimes"] = YTDL_JS_RUNTIME
+    YTDL_OPTIONS["js_runtimes"] = {runtime.strip(): {} for runtime in YTDL_JS_RUNTIME.split(",") if runtime.strip()}
 
 FFMPEG_OPTIONS = {
     "options": "-vn",
