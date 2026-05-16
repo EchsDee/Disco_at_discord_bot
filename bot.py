@@ -38,6 +38,7 @@ DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8765"))
 ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
 MAX_PLAYLIST_TRACKS = int(os.getenv("MAX_PLAYLIST_TRACKS", "50"))
 YTDL_COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE")
+YTDL_FORMAT = os.getenv("YTDL_FORMAT", "bestaudio/best")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN. Put it in a .env file or environment variable.")
@@ -56,7 +57,7 @@ dashboard_runner: Optional[web.AppRunner] = None
 
 
 YTDL_OPTIONS = {
-    "format": "bestaudio[acodec!=none]/best[acodec!=none]/best",
+    "format": YTDL_FORMAT,
     "noplaylist": True,
     "default_search": "ytsearch",
     "quiet": True,

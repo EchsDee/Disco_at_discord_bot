@@ -58,6 +58,7 @@ runcmd:
     ENABLE_TRAY_ICON=0
     MAX_PLAYLIST_TRACKS=50
     YTDL_COOKIE_FILE=
+    YTDL_FORMAT=bestaudio/best
     EOF
   - chown discobot:discobot /opt/disco-at-discord/.env
   - chmod 600 /opt/disco-at-discord/.env
