@@ -80,6 +80,7 @@ ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 playlist_ytdl = yt_dlp.YoutubeDL(
     {
         **YTDL_OPTIONS,
+        "extract_flat": "in_playlist",
         "noplaylist": False,
         "playlistend": MAX_PLAYLIST_TRACKS,
     }
@@ -1443,7 +1444,19 @@ async def extract_tracks(query: str, requester: str) -> list[Track]:
     if "entries" in data:
         entries = [entry for entry in data["entries"] if entry]
         if looks_like_playlist_query(query):
-            tracks = [track_from_data(entry, query, requester) for entry in entries if "url" in entry]
+            tracks = []
+            for index, entry in enumerate(entries[:MAX_PLAYLIST_TRACKS], start=1):
+                entry_url = entry.get("webpage_url") or entry.get("url")
+                if not entry_url:
+                    continue
+
+                print(f"Extracting playlist item {index}/{len(entries)} for {requester}: {entry_url}", flush=True)
+                item_data = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda item_url=entry_url: ytdl.extract_info(item_url, download=False)),
+                    timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
+                )
+                tracks.append(track_from_data(item_data, entry_url, requester))
+
             if not tracks:
                 raise commands.CommandError("No playable tracks found in that playlist.")
             print(f"Extracted playlist with {len(tracks)} tracks for {requester}", flush=True)
