@@ -96,6 +96,20 @@ def dashboard_public_url() -> str:
     return DASHBOARD_PUBLIC_URL or dashboard_url()
 
 
+def discord_avatar_url(user_data: dict) -> str:
+    user_id = str(user_data.get("id", ""))
+    avatar_hash = user_data.get("avatar")
+    if user_id and avatar_hash:
+        extension = "gif" if str(avatar_hash).startswith("a_") else "png"
+        return f"https://cdn.discordapp.com/avatars/{user_id}/{avatar_hash}.{extension}?size=80"
+
+    try:
+        default_index = (int(user_id) >> 22) % 6
+    except (TypeError, ValueError):
+        default_index = 0
+    return f"https://cdn.discordapp.com/embed/avatars/{default_index}.png"
+
+
 def sign_value(value: str) -> str:
     signature = hmac.new(
         DASHBOARD_SESSION_SECRET.encode("utf-8"),
@@ -647,14 +661,14 @@ async def dashboard_index(request: web.Request) -> web.Response:
 
 
 async def dashboard_login_page(request: web.Request) -> web.Response:
-    if is_dashboard_session_valid(request):
+    if get_dashboard_user(request):
         raise web.HTTPFound("/")
 
     html = (
-        DASHBOARD_LOGIN_HTML.replace("{{DISCORD_LOGIN_DISPLAY}}", "block" if discord_oauth_enabled() else "none")
+        DASHBOARD_LOGIN_HTML.replace("{{DISCORD_LOGIN_DISPLAY}}", "flex" if discord_oauth_enabled() else "none")
         .replace("{{PASSWORD_LOGIN_DISPLAY}}", "grid" if DASHBOARD_PASSWORD else "none")
     )
-    return web.Response(text=html, content_type="text/html")
+    return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 async def dashboard_login(request: web.Request) -> web.Response:
@@ -677,6 +691,7 @@ async def dashboard_login(request: web.Request) -> web.Response:
                 "type": "password",
                 "id": "password",
                 "name": username,
+                "avatar_url": "",
                 "superuser": True,
                 "guild_ids": "all",
             }
@@ -762,6 +777,7 @@ async def dashboard_discord_callback(request: web.Request) -> web.Response:
             allowed_guild_ids.append(guild_id)
 
     display_name = user_data.get("global_name") or user_data.get("username") or discord_user_id
+    avatar_url = discord_avatar_url(user_data)
     response = web.HTTPFound("/")
     response.set_cookie(
         "dashboard_session",
@@ -770,6 +786,7 @@ async def dashboard_discord_callback(request: web.Request) -> web.Response:
                 "type": "discord",
                 "id": discord_user_id,
                 "name": display_name,
+                "avatar_url": avatar_url,
                 "superuser": superuser,
                 "guild_ids": "all" if superuser else allowed_guild_ids,
             }
@@ -801,6 +818,7 @@ async def dashboard_status(request: web.Request) -> web.Response:
             },
             "user": {
                 "name": user.get("name", ""),
+                "avatar_url": user.get("avatar_url", ""),
                 "superuser": bool(user.get("superuser")),
             },
             "guilds": [guild_to_payload(guild) for guild in visible_dashboard_guilds(request)],
@@ -1164,12 +1182,13 @@ DASHBOARD_LOGIN_HTML = """
   <style>
     :root {
       color-scheme: dark;
-      --bg: #121318;
+      --bg: #0e1016;
       --panel: #1d2029;
       --line: #333746;
       --text: #f4f5f8;
       --muted: #a8adbd;
       --accent: #58c4dd;
+      --discord: #5865f2;
     }
     * { box-sizing: border-box; }
     body {
@@ -1177,22 +1196,26 @@ DASHBOARD_LOGIN_HTML = """
       margin: 0;
       display: grid;
       place-items: center;
-      background: var(--bg);
+      background:
+        radial-gradient(circle at 50% 42%, rgba(88, 101, 242, 0.24), transparent 34rem),
+        linear-gradient(135deg, #0d1017, #171922 55%, #10131a);
       color: var(--text);
       font-family: Segoe UI, system-ui, sans-serif;
     }
     form {
-      width: min(380px, calc(100% - 28px));
+      width: min(520px, calc(100% - 28px));
       display: grid;
-      gap: 12px;
+      gap: 14px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: var(--panel);
-      padding: 18px;
+      background: rgba(29, 32, 41, 0.92);
+      box-shadow: 0 22px 70px rgba(0, 0, 0, 0.44);
+      padding: 24px;
     }
     h1 {
       margin: 0 0 4px;
-      font-size: 20px;
+      font-size: 22px;
+      text-align: center;
     }
     input, button {
       min-height: 38px;
@@ -1212,16 +1235,24 @@ DASHBOARD_LOGIN_HTML = """
       gap: 12px;
     }
     .discord-login {
-      min-height: 40px;
-      display: grid;
-      place-items: center;
+      min-height: 74px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
       border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #5865f2;
+      border-radius: 8px;
+      background: linear-gradient(180deg, #6370ff, var(--discord));
+      box-shadow: 0 0 34px rgba(88, 101, 242, 0.54), inset 0 -8px 0 rgba(0, 0, 0, 0.08);
       color: white;
       text-decoration: none;
-      font-weight: 650;
+      font-size: clamp(20px, 5vw, 32px);
+      font-weight: 750;
+      letter-spacing: 0;
+      transition: transform 120ms ease, filter 120ms ease;
     }
+    .discord-login:hover { filter: brightness(1.06); transform: translateY(-1px); }
+    .discord-login svg { width: 54px; height: 54px; flex: 0 0 auto; }
     .divider {
       text-align: center;
       color: var(--muted);
@@ -1237,7 +1268,13 @@ DASHBOARD_LOGIN_HTML = """
 <body>
   <form id="loginForm">
     <h1>Disco at Discord</h1>
-    <a class="discord-login" href="/auth/discord/start" style="display: {{DISCORD_LOGIN_DISPLAY}};">Log In With Discord</a>
+    <a class="discord-login" href="/auth/discord/start" style="display: {{DISCORD_LOGIN_DISPLAY}};" aria-label="Sign in with Discord">
+      <svg viewBox="0 0 245 240" aria-hidden="true" focusable="false">
+        <path fill="currentColor" d="M104.4 103.9c-5.7 0-10.2 5-10.2 11.1s4.6 11.1 10.2 11.1c5.7 0 10.3-5 10.2-11.1 0-6.1-4.5-11.1-10.2-11.1Zm36.5 0c-5.7 0-10.2 5-10.2 11.1s4.6 11.1 10.2 11.1c5.7 0 10.2-5 10.2-11.1s-4.5-11.1-10.2-11.1Z"/>
+        <path fill="currentColor" d="M189.5 20h-134C44.2 20 35 29.2 35 40.6v135.2c0 11.4 9.2 20.6 20.5 20.6h113.4l-5.3-18.5 12.8 11.9 12.1 11.2 21.5 19V40.6c0-11.4-9.2-20.6-20.5-20.6Zm-38.6 130.6s-3.6-4.3-6.6-8.1c13.1-3.7 18.1-11.9 18.1-11.9-4.1 2.7-8 4.6-11.5 5.9-5 2.1-9.8 3.4-14.5 4.2-9.6 1.8-18.4 1.3-25.9-.1-5.7-1.1-10.6-2.7-14.7-4.2-2.3-.9-4.8-2-7.3-3.4-.3-.2-.6-.3-.9-.5-.2-.1-.3-.2-.4-.3-1.8-1-2.8-1.7-2.8-1.7s4.8 8 17.5 11.8c-3 3.8-6.7 8.3-6.7 8.3-22.1-.7-30.5-15.2-30.5-15.2 0-32.2 14.4-58.3 14.4-58.3 14.4-10.8 28.1-10.5 28.1-10.5l1 1.2c-18 5.2-26.3 13.1-26.3 13.1s2.2-1.2 5.9-2.8c10.7-4.7 19.2-6 22.7-6.3.6-.1 1.1-.2 1.7-.2 6.1-.8 13-1 20.2-.2 9.5 1.1 19.7 3.9 30.1 9.6 0 0-7.9-7.5-24.9-12.7l1.4-1.6s13.7-.3 28.1 10.5c0 0 14.4 26.1 14.4 58.3 0 0-8.5 14.5-30.6 15.2Z"/>
+      </svg>
+      <span>Sign in with Discord</span>
+    </a>
     <div class="divider" style="display: {{DISCORD_LOGIN_DISPLAY}};">or</div>
     <div class="password-login" style="display: {{PASSWORD_LOGIN_DISPLAY}};">
       <input name="username" autocomplete="username" placeholder="Username">
@@ -1334,6 +1371,22 @@ DASHBOARD_HTML = """
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+    }
+    .user-card {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .user-avatar {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: #2a2e3a;
+      border: 1px solid var(--line);
+      object-fit: cover;
+      display: none;
+      flex: 0 0 auto;
     }
     .log-box {
       max-height: 260px;
@@ -1485,6 +1538,7 @@ DASHBOARD_HTML = """
       .message-row { grid-template-columns: 1fr; }
       .play-row { grid-template-columns: 1fr; }
       .sound-item { grid-template-columns: 1fr; }
+      .admin-head { align-items: flex-start; flex-direction: column; }
     }
   </style>
 </head>
@@ -1496,10 +1550,13 @@ DASHBOARD_HTML = """
   <main>
     <section class="admin">
       <div class="admin-head">
-        <div>
-          <h3>Admin</h3>
-          <div class="meta" id="dashboardUser"></div>
-          <div class="toast" id="adminToast"></div>
+        <div class="user-card">
+          <img class="user-avatar" id="dashboardAvatar" alt="">
+          <div>
+            <h3>Admin</h3>
+            <div class="meta" id="dashboardUser"></div>
+            <div class="toast" id="adminToast"></div>
+          </div>
         </div>
         <div class="controls" id="superuserControls">
           <button onclick="updateBot()">Update From Git</button>
@@ -1519,6 +1576,7 @@ DASHBOARD_HTML = """
     const adminToast = document.getElementById("adminToast");
     const logBox = document.getElementById("logBox");
     const dashboardUser = document.getElementById("dashboardUser");
+    const dashboardAvatar = document.getElementById("dashboardAvatar");
     const superuserControls = document.getElementById("superuserControls");
     const guildNames = {};
     const drafts = {};
@@ -1648,6 +1706,13 @@ DASHBOARD_HTML = """
       saveDrafts();
       botStatus.textContent = `${data.bot.name} · ${data.bot.ready ? "online" : "starting"}`;
       dashboardUser.textContent = data.user && data.user.name ? `Logged in as ${data.user.name}` : "";
+      if (data.user && data.user.avatar_url) {
+        dashboardAvatar.src = data.user.avatar_url;
+        dashboardAvatar.style.display = "block";
+      } else {
+        dashboardAvatar.removeAttribute("src");
+        dashboardAvatar.style.display = "none";
+      }
       superuserControls.style.display = data.user && data.user.superuser ? "flex" : "none";
       data.guilds.forEach(guild => guildNames[guild.id] = guild.name);
       servers.innerHTML = data.guilds.map(guild => `
