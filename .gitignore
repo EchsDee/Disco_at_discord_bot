@@ -16,6 +16,7 @@ soundboard_files/
 *.key.pub
 *.pem
 *.ppk
+*cookies*.txt
 
 .DS_Store
 Thumbs.db

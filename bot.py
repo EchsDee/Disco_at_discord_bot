@@ -56,7 +56,7 @@ dashboard_runner: Optional[web.AppRunner] = None
 
 
 YTDL_OPTIONS = {
-    "format": "bestaudio[ext=m4a]/bestaudio/best",
+    "format": "bestaudio[acodec!=none]/best[acodec!=none]/best",
     "noplaylist": True,
     "default_search": "ytsearch",
     "quiet": True,
@@ -626,7 +626,10 @@ async def dashboard_control(request: web.Request) -> web.Response:
         else:
             await voice_channel.connect()
 
-        tracks = await extract_tracks(query, "Dashboard")
+        try:
+            tracks = await extract_tracks(query, "Dashboard")
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": f"Could not load that track: {exc}"}, status=400)
         await queue_tracks(state, tracks)
 
         music_channel_id = get_music_channel_id(guild.id)
@@ -730,7 +733,10 @@ async def dashboard_control(request: web.Request) -> web.Response:
                 )
             ]
         else:
-            tracks = await extract_tracks(query, f"Soundboard: {sound['name']}")
+            try:
+                tracks = await extract_tracks(query, f"Soundboard: {sound['name']}")
+            except Exception as exc:
+                return web.json_response({"ok": False, "error": f"Could not load that sound: {exc}"}, status=400)
         await queue_tracks(state, tracks)
 
         music_channel_id = get_music_channel_id(guild.id)
@@ -1618,7 +1624,10 @@ async def play(ctx: commands.Context, *, query: str) -> None:
     state = get_music_state(ctx.guild.id)
 
     async with ctx.typing():
-        tracks = await extract_tracks(query, str(ctx.author.display_name))
+        try:
+            tracks = await extract_tracks(query, str(ctx.author.display_name))
+        except Exception as exc:
+            raise commands.CommandError(f"Could not load that track: {exc}") from exc
         await queue_tracks(state, tracks)
 
     await send_clean(ctx, queued_tracks_message(tracks), view=MusicControlView())
