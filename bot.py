@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -15,9 +16,9 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
-from aiohttp import web
+from aiohttp import ClientSession, web
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -41,9 +42,17 @@ SOUNDBOARD_FILES_DIR = Path("soundboard_files")
 MUSIC_IDLE_TIMEOUT_SECONDS = int(os.getenv("MUSIC_IDLE_TIMEOUT_SECONDS", "60"))
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8765"))
+DASHBOARD_PUBLIC_URL = os.getenv("DASHBOARD_PUBLIC_URL", "").rstrip("/")
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 DASHBOARD_SESSION_SECRET = os.getenv("DASHBOARD_SESSION_SECRET") or DISCORD_TOKEN or secrets.token_urlsafe(32)
+DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
+DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
+DASHBOARD_SUPERUSER_IDS = {
+    user_id.strip()
+    for user_id in os.getenv("DASHBOARD_SUPERUSER_IDS", "257231933782622210").split(",")
+    if user_id.strip()
+}
 ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
 MAX_PLAYLIST_TRACKS = int(os.getenv("MAX_PLAYLIST_TRACKS", "50"))
 YTDL_EXTRACT_TIMEOUT_SECONDS = int(os.getenv("YTDL_EXTRACT_TIMEOUT_SECONDS", "90"))
@@ -76,35 +85,94 @@ def log_event(message: str) -> None:
 
 
 def dashboard_auth_enabled() -> bool:
-    return bool(DASHBOARD_PASSWORD)
+    return bool(DASHBOARD_PASSWORD or discord_oauth_enabled())
 
 
-def make_dashboard_session(username: str) -> str:
+def discord_oauth_enabled() -> bool:
+    return bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and DASHBOARD_PUBLIC_URL)
+
+
+def dashboard_public_url() -> str:
+    return DASHBOARD_PUBLIC_URL or dashboard_url()
+
+
+def sign_value(value: str) -> str:
     signature = hmac.new(
         DASHBOARD_SESSION_SECRET.encode("utf-8"),
-        username.encode("utf-8"),
+        value.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-    return f"{username}:{signature}"
+    return f"{value}.{signature}"
+
+
+def verify_signed_value(signed_value: str) -> Optional[str]:
+    value, separator, signature = signed_value.rpartition(".")
+    if separator != "." or not value or not signature:
+        return None
+
+    expected = sign_value(value)
+    return value if hmac.compare_digest(signed_value, expected) else None
+
+
+def make_dashboard_session(payload: dict) -> str:
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+    return sign_value(encoded)
+
+
+def get_dashboard_user(request: web.Request) -> Optional[dict]:
+    if not dashboard_auth_enabled():
+        return {"id": "local", "name": "Local", "superuser": True, "guild_ids": "all"}
+
+    encoded = verify_signed_value(request.cookies.get("dashboard_session", ""))
+    if not encoded:
+        return None
+
+    try:
+        return json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 def is_dashboard_session_valid(request: web.Request) -> bool:
-    if not dashboard_auth_enabled():
-        return True
+    return get_dashboard_user(request) is not None
 
-    session = request.cookies.get("dashboard_session", "")
-    username, separator, signature = session.partition(":")
-    if separator != ":" or username != DASHBOARD_USERNAME:
+
+def dashboard_user_is_superuser(request: web.Request) -> bool:
+    user = request.get("dashboard_user") or get_dashboard_user(request)
+    return bool(user and user.get("superuser"))
+
+
+def dashboard_user_can_access_guild(request: web.Request, guild_id: int) -> bool:
+    user = request.get("dashboard_user") or get_dashboard_user(request)
+    if not user:
         return False
+    if user.get("superuser"):
+        return True
+    return str(guild_id) in set(user.get("guild_ids") or [])
 
-    expected = make_dashboard_session(username)
-    return hmac.compare_digest(session, expected)
+
+def visible_dashboard_guilds(request: web.Request) -> list[discord.Guild]:
+    user = request.get("dashboard_user") or get_dashboard_user(request)
+    if not user:
+        return []
+    if user.get("superuser"):
+        return list(bot.guilds)
+
+    allowed_guild_ids = set(user.get("guild_ids") or [])
+    return [guild for guild in bot.guilds if str(guild.id) in allowed_guild_ids]
 
 
 @web.middleware
 async def dashboard_auth_middleware(request: web.Request, handler):
-    public_paths = {"/login", "/api/login"}
-    if request.path in public_paths or is_dashboard_session_valid(request):
+    public_paths = {"/login", "/api/login", "/auth/discord/start", "/auth/discord/callback"}
+    if request.path in public_paths:
+        return await handler(request)
+
+    user = get_dashboard_user(request)
+    if user:
+        request["dashboard_user"] = user
         return await handler(request)
 
     if request.path.startswith("/api/"):
@@ -582,7 +650,11 @@ async def dashboard_login_page(request: web.Request) -> web.Response:
     if is_dashboard_session_valid(request):
         raise web.HTTPFound("/")
 
-    return web.Response(text=DASHBOARD_LOGIN_HTML, content_type="text/html")
+    html = (
+        DASHBOARD_LOGIN_HTML.replace("{{DISCORD_LOGIN_DISPLAY}}", "block" if discord_oauth_enabled() else "none")
+        .replace("{{PASSWORD_LOGIN_DISPLAY}}", "grid" if DASHBOARD_PASSWORD else "none")
+    )
+    return web.Response(text=html, content_type="text/html")
 
 
 async def dashboard_login(request: web.Request) -> web.Response:
@@ -600,13 +672,114 @@ async def dashboard_login(request: web.Request) -> web.Response:
     response = web.json_response({"ok": True, "message": "Logged in."})
     response.set_cookie(
         "dashboard_session",
-        make_dashboard_session(username),
+        make_dashboard_session(
+            {
+                "type": "password",
+                "id": "password",
+                "name": username,
+                "superuser": True,
+                "guild_ids": "all",
+            }
+        ),
         httponly=True,
         samesite="Strict",
         max_age=60 * 60 * 24 * 30,
     )
     log_event(f"Dashboard login succeeded for {username}.")
     return response
+
+
+async def dashboard_discord_start(request: web.Request) -> web.Response:
+    if not discord_oauth_enabled():
+        raise web.HTTPNotFound()
+
+    state = secrets.token_urlsafe(24)
+    params = urlencode(
+        {
+            "client_id": DISCORD_CLIENT_ID,
+            "redirect_uri": f"{dashboard_public_url()}/auth/discord/callback",
+            "response_type": "code",
+            "scope": "identify guilds",
+            "state": state,
+        }
+    )
+    response = web.HTTPFound(f"https://discord.com/oauth2/authorize?{params}")
+    response.set_cookie("dashboard_oauth_state", sign_value(state), httponly=True, samesite="Lax", max_age=600)
+    raise response
+
+
+async def dashboard_discord_callback(request: web.Request) -> web.Response:
+    if not discord_oauth_enabled():
+        raise web.HTTPNotFound()
+
+    state = request.query.get("state", "")
+    code = request.query.get("code", "")
+    if not state or not code or verify_signed_value(request.cookies.get("dashboard_oauth_state", "")) != state:
+        log_event("Discord dashboard login failed state validation.")
+        raise web.HTTPUnauthorized(text="Invalid Discord login state.")
+
+    async with ClientSession() as session:
+        token_response = await session.post(
+            "https://discord.com/api/oauth2/token",
+            data={
+                "client_id": DISCORD_CLIENT_ID,
+                "client_secret": DISCORD_CLIENT_SECRET,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": f"{dashboard_public_url()}/auth/discord/callback",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        token_data = await token_response.json()
+        if token_response.status != 200:
+            log_event(f"Discord dashboard token exchange failed: {token_data}")
+            raise web.HTTPUnauthorized(text="Discord login failed.")
+
+        access_token = token_data["access_token"]
+        headers = {"Authorization": f"Bearer {access_token}"}
+        user_response = await session.get("https://discord.com/api/users/@me", headers=headers)
+        guilds_response = await session.get("https://discord.com/api/users/@me/guilds", headers=headers)
+        user_data = await user_response.json()
+        guilds_data = await guilds_response.json()
+
+    if user_response.status != 200 or guilds_response.status != 200:
+        log_event("Discord dashboard login failed while loading user guilds.")
+        raise web.HTTPUnauthorized(text="Could not load Discord account permissions.")
+
+    discord_user_id = str(user_data["id"])
+    superuser = discord_user_id in DASHBOARD_SUPERUSER_IDS
+    admin_permission_bits = discord.Permissions(administrator=True).value | discord.Permissions(manage_guild=True).value
+    allowed_guild_ids = []
+    bot_guild_ids = {str(guild.id) for guild in bot.guilds}
+    for guild_data in guilds_data:
+        guild_id = str(guild_data.get("id"))
+        try:
+            permissions = int(guild_data.get("permissions", "0"))
+        except (TypeError, ValueError):
+            permissions = 0
+        if guild_id in bot_guild_ids and (permissions & admin_permission_bits):
+            allowed_guild_ids.append(guild_id)
+
+    display_name = user_data.get("global_name") or user_data.get("username") or discord_user_id
+    response = web.HTTPFound("/")
+    response.set_cookie(
+        "dashboard_session",
+        make_dashboard_session(
+            {
+                "type": "discord",
+                "id": discord_user_id,
+                "name": display_name,
+                "superuser": superuser,
+                "guild_ids": "all" if superuser else allowed_guild_ids,
+            }
+        ),
+        httponly=True,
+        samesite="Strict",
+        max_age=60 * 60 * 24 * 30,
+    )
+    response.del_cookie("dashboard_oauth_state")
+    log_event(f"Discord dashboard login succeeded for {display_name} ({discord_user_id}).")
+    raise response
 
 
 async def dashboard_logout(request: web.Request) -> web.Response:
@@ -616,6 +789,7 @@ async def dashboard_logout(request: web.Request) -> web.Response:
 
 
 async def dashboard_status(request: web.Request) -> web.Response:
+    user = request.get("dashboard_user") or get_dashboard_user(request) or {}
     return web.json_response(
         {
             "bot": {
@@ -623,16 +797,26 @@ async def dashboard_status(request: web.Request) -> web.Response:
                 "ready": bot.is_ready(),
                 "dashboard_url": dashboard_url(),
             },
-            "guilds": [guild_to_payload(guild) for guild in bot.guilds],
+            "user": {
+                "name": user.get("name", ""),
+                "superuser": bool(user.get("superuser")),
+            },
+            "guilds": [guild_to_payload(guild) for guild in visible_dashboard_guilds(request)],
         }
     )
 
 
 async def dashboard_logs(request: web.Request) -> web.Response:
+    if not dashboard_user_is_superuser(request):
+        return web.json_response({"ok": False, "error": "Superuser access required."}, status=403)
+
     return web.json_response({"logs": list(recent_logs)})
 
 
 async def dashboard_update_bot(request: web.Request) -> web.Response:
+    if not dashboard_user_is_superuser(request):
+        return web.json_response({"ok": False, "error": "Superuser access required."}, status=403)
+
     try:
         result = await asyncio.to_thread(
             subprocess.run,
@@ -676,6 +860,8 @@ async def dashboard_control(request: web.Request) -> web.Response:
     guild = bot.get_guild(int(request.match_info["guild_id"]))
     if guild is None:
         return web.json_response({"ok": False, "error": "Unknown server."}, status=404)
+    if not dashboard_user_can_access_guild(request, guild.id):
+        return web.json_response({"ok": False, "error": "You do not have dashboard access to this server."}, status=403)
 
     if request.content_type.startswith("multipart/"):
         data = await request.post()
@@ -918,6 +1104,8 @@ async def start_dashboard() -> None:
     app.router.add_get("/", dashboard_index)
     app.router.add_get("/login", dashboard_login_page)
     app.router.add_post("/api/login", dashboard_login)
+    app.router.add_get("/auth/discord/start", dashboard_discord_start)
+    app.router.add_get("/auth/discord/callback", dashboard_discord_callback)
     app.router.add_post("/api/logout", dashboard_logout)
     app.router.add_get("/api/status", dashboard_status)
     app.router.add_get("/api/logs", dashboard_logs)
@@ -1017,6 +1205,26 @@ DASHBOARD_LOGIN_HTML = """
       background: #272b36;
     }
     button:hover { border-color: var(--accent); }
+    .password-login {
+      display: grid;
+      gap: 12px;
+    }
+    .discord-login {
+      min-height: 40px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #5865f2;
+      color: white;
+      text-decoration: none;
+      font-weight: 650;
+    }
+    .divider {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
     .status {
       min-height: 18px;
       color: var(--muted);
@@ -1027,9 +1235,13 @@ DASHBOARD_LOGIN_HTML = """
 <body>
   <form id="loginForm">
     <h1>Disco at Discord</h1>
-    <input name="username" autocomplete="username" placeholder="Username" required>
-    <input name="password" type="password" autocomplete="current-password" placeholder="Password" required>
-    <button type="submit">Log In</button>
+    <a class="discord-login" href="/auth/discord/start" style="display: {{DISCORD_LOGIN_DISPLAY}};">Log In With Discord</a>
+    <div class="divider" style="display: {{DISCORD_LOGIN_DISPLAY}};">or</div>
+    <div class="password-login" style="display: {{PASSWORD_LOGIN_DISPLAY}};">
+      <input name="username" autocomplete="username" placeholder="Username">
+      <input name="password" type="password" autocomplete="current-password" placeholder="Password">
+      <button type="submit">Log In</button>
+    </div>
     <div class="status" id="status"></div>
   </form>
   <script>
@@ -1038,6 +1250,7 @@ DASHBOARD_LOGIN_HTML = """
 
     form.addEventListener("submit", async event => {
       event.preventDefault();
+      if (form.querySelector(".password-login").style.display === "none") return;
       status.textContent = "Logging in...";
       const response = await fetch("/api/login", {
         method: "POST",
@@ -1283,15 +1496,18 @@ DASHBOARD_HTML = """
       <div class="admin-head">
         <div>
           <h3>Admin</h3>
+          <div class="meta" id="dashboardUser"></div>
           <div class="toast" id="adminToast"></div>
         </div>
-        <div class="controls">
+        <div class="controls" id="superuserControls">
           <button onclick="updateBot()">Update From Git</button>
           <button onclick="refreshLogs()">Refresh Logs</button>
+        </div>
+        <div class="controls">
           <button onclick="logoutDashboard()">Log Out</button>
         </div>
       </div>
-      <div class="log-box" id="logBox">Loading logs...</div>
+      <div class="log-box" id="logBox">Logs are only visible to superusers.</div>
     </section>
     <div id="servers"></div>
   </main>
@@ -1300,6 +1516,8 @@ DASHBOARD_HTML = """
     const botStatus = document.getElementById("botStatus");
     const adminToast = document.getElementById("adminToast");
     const logBox = document.getElementById("logBox");
+    const dashboardUser = document.getElementById("dashboardUser");
+    const superuserControls = document.getElementById("superuserControls");
     const guildNames = {};
     const drafts = {};
     const selectedVoiceChannels = {};
@@ -1427,6 +1645,8 @@ DASHBOARD_HTML = """
       } : null;
       saveDrafts();
       botStatus.textContent = `${data.bot.name} · ${data.bot.ready ? "online" : "starting"}`;
+      dashboardUser.textContent = data.user && data.user.name ? `Logged in as ${data.user.name}` : "";
+      superuserControls.style.display = data.user && data.user.superuser ? "flex" : "none";
       data.guilds.forEach(guild => guildNames[guild.id] = guild.name);
       servers.innerHTML = data.guilds.map(guild => `
         <section class="server">
@@ -1494,12 +1714,19 @@ DASHBOARD_HTML = """
 
     async function refresh() {
       const response = await fetch("/api/status");
-      render(await response.json());
-      await refreshLogs();
+      const data = await response.json();
+      render(data);
+      if (data.user && data.user.superuser) {
+        await refreshLogs();
+      }
     }
 
     async function refreshLogs() {
       const response = await fetch("/api/logs");
+      if (response.status === 403) {
+        logBox.textContent = "Logs are only visible to superusers.";
+        return;
+      }
       const data = await response.json();
       logBox.textContent = data.logs.length ? data.logs.join("\\n") : "No dashboard logs yet.";
       logBox.scrollTop = logBox.scrollHeight;
