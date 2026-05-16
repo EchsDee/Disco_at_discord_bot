@@ -86,6 +86,9 @@ Dashboard settings:
 
 - `DASHBOARD_HOST=127.0.0.1`: keep the dashboard local to your machine
 - `DASHBOARD_PORT=8765`: local dashboard port
+- `DASHBOARD_USERNAME=admin`: dashboard login username when `DASHBOARD_PASSWORD` is set
+- `DASHBOARD_PASSWORD=`: dashboard login password; leave blank to disable login
+- `DASHBOARD_SESSION_SECRET=`: optional cookie signing secret; set a long random value for public dashboards
 - `ENABLE_TRAY_ICON=1`: set to `0` to disable the tray icon
 - `MAX_PLAYLIST_TRACKS=50`: maximum songs to add from one playlist link
 - `YTDL_EXTRACT_TIMEOUT_SECONDS=90`: maximum time to wait for yt-dlp extraction

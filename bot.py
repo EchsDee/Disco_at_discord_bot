@@ -1,8 +1,11 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import shlex
 import re
+import secrets
 import subprocess
 import threading
 import time
@@ -38,6 +41,9 @@ SOUNDBOARD_FILES_DIR = Path("soundboard_files")
 MUSIC_IDLE_TIMEOUT_SECONDS = int(os.getenv("MUSIC_IDLE_TIMEOUT_SECONDS", "60"))
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8765"))
+DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+DASHBOARD_SESSION_SECRET = os.getenv("DASHBOARD_SESSION_SECRET") or DISCORD_TOKEN or secrets.token_urlsafe(32)
 ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
 MAX_PLAYLIST_TRACKS = int(os.getenv("MAX_PLAYLIST_TRACKS", "50"))
 YTDL_EXTRACT_TIMEOUT_SECONDS = int(os.getenv("YTDL_EXTRACT_TIMEOUT_SECONDS", "90"))
@@ -67,6 +73,44 @@ def log_event(message: str) -> None:
     line = f"[{timestamp}] {message}"
     recent_logs.append(line)
     print(line, flush=True)
+
+
+def dashboard_auth_enabled() -> bool:
+    return bool(DASHBOARD_PASSWORD)
+
+
+def make_dashboard_session(username: str) -> str:
+    signature = hmac.new(
+        DASHBOARD_SESSION_SECRET.encode("utf-8"),
+        username.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{username}:{signature}"
+
+
+def is_dashboard_session_valid(request: web.Request) -> bool:
+    if not dashboard_auth_enabled():
+        return True
+
+    session = request.cookies.get("dashboard_session", "")
+    username, separator, signature = session.partition(":")
+    if separator != ":" or username != DASHBOARD_USERNAME:
+        return False
+
+    expected = make_dashboard_session(username)
+    return hmac.compare_digest(session, expected)
+
+
+@web.middleware
+async def dashboard_auth_middleware(request: web.Request, handler):
+    public_paths = {"/login", "/api/login"}
+    if request.path in public_paths or is_dashboard_session_valid(request):
+        return await handler(request)
+
+    if request.path.startswith("/api/"):
+        return web.json_response({"ok": False, "error": "Login required."}, status=401)
+
+    raise web.HTTPFound("/login")
 
 
 YTDL_OPTIONS = {
@@ -534,6 +578,43 @@ async def dashboard_index(request: web.Request) -> web.Response:
     return web.Response(text=DASHBOARD_HTML, content_type="text/html")
 
 
+async def dashboard_login_page(request: web.Request) -> web.Response:
+    if is_dashboard_session_valid(request):
+        raise web.HTTPFound("/")
+
+    return web.Response(text=DASHBOARD_LOGIN_HTML, content_type="text/html")
+
+
+async def dashboard_login(request: web.Request) -> web.Response:
+    data = await request.post()
+    username = str(data.get("username", ""))
+    password = str(data.get("password", ""))
+
+    if not dashboard_auth_enabled():
+        return web.json_response({"ok": True, "message": "Dashboard login is disabled."})
+
+    if username != DASHBOARD_USERNAME or not hmac.compare_digest(password, DASHBOARD_PASSWORD):
+        log_event("Dashboard login failed.")
+        return web.json_response({"ok": False, "error": "Invalid username or password."}, status=401)
+
+    response = web.json_response({"ok": True, "message": "Logged in."})
+    response.set_cookie(
+        "dashboard_session",
+        make_dashboard_session(username),
+        httponly=True,
+        samesite="Strict",
+        max_age=60 * 60 * 24 * 30,
+    )
+    log_event(f"Dashboard login succeeded for {username}.")
+    return response
+
+
+async def dashboard_logout(request: web.Request) -> web.Response:
+    response = web.json_response({"ok": True, "message": "Logged out."})
+    response.del_cookie("dashboard_session")
+    return response
+
+
 async def dashboard_status(request: web.Request) -> web.Response:
     return web.json_response(
         {
@@ -833,8 +914,11 @@ async def dashboard_control(request: web.Request) -> web.Response:
 async def start_dashboard() -> None:
     global dashboard_runner
 
-    app = web.Application()
+    app = web.Application(middlewares=[dashboard_auth_middleware])
     app.router.add_get("/", dashboard_index)
+    app.router.add_get("/login", dashboard_login_page)
+    app.router.add_post("/api/login", dashboard_login)
+    app.router.add_post("/api/logout", dashboard_logout)
     app.router.add_get("/api/status", dashboard_status)
     app.router.add_get("/api/logs", dashboard_logs)
     app.router.add_post("/api/update", dashboard_update_bot)
@@ -878,6 +962,98 @@ def start_tray_icon() -> None:
         ),
     )
     threading.Thread(target=icon.run, daemon=True).start()
+
+
+DASHBOARD_LOGIN_HTML = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Disco at Discord Login</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #121318;
+      --panel: #1d2029;
+      --line: #333746;
+      --text: #f4f5f8;
+      --muted: #a8adbd;
+      --accent: #58c4dd;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Segoe UI, system-ui, sans-serif;
+    }
+    form {
+      width: min(380px, calc(100% - 28px));
+      display: grid;
+      gap: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 18px;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 20px;
+    }
+    input, button {
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #151821;
+      color: var(--text);
+      padding: 0 10px;
+    }
+    button {
+      cursor: pointer;
+      background: #272b36;
+    }
+    button:hover { border-color: var(--accent); }
+    .status {
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <form id="loginForm">
+    <h1>Disco at Discord</h1>
+    <input name="username" autocomplete="username" placeholder="Username" required>
+    <input name="password" type="password" autocomplete="current-password" placeholder="Password" required>
+    <button type="submit">Log In</button>
+    <div class="status" id="status"></div>
+  </form>
+  <script>
+    const form = document.getElementById("loginForm");
+    const status = document.getElementById("status");
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      status.textContent = "Logging in...";
+      const response = await fetch("/api/login", {
+        method: "POST",
+        body: new FormData(form)
+      });
+      const data = await response.json();
+      if (response.ok) {
+        window.location.href = "/";
+      } else {
+        status.textContent = data.error || "Login failed.";
+      }
+    });
+  </script>
+</body>
+</html>
+"""
 
 
 DASHBOARD_HTML = """
@@ -1112,6 +1288,7 @@ DASHBOARD_HTML = """
         <div class="controls">
           <button onclick="updateBot()">Update From Git</button>
           <button onclick="refreshLogs()">Refresh Logs</button>
+          <button onclick="logoutDashboard()">Log Out</button>
         </div>
       </div>
       <div class="log-box" id="logBox">Loading logs...</div>
@@ -1338,6 +1515,11 @@ DASHBOARD_HTML = """
         logBox.textContent += `\\n${data.output}`;
         logBox.scrollTop = logBox.scrollHeight;
       }
+    }
+
+    async function logoutDashboard() {
+      await fetch("/api/logout", { method: "POST" });
+      window.location.href = "/login";
     }
 
     async function control(guildId, action, extra = {}) {
