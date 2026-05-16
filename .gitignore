@@ -12,5 +12,10 @@ venv/
 bot_config.json
 soundboard_files/
 
+*.key
+*.key.pub
+*.pem
+*.ppk
+
 .DS_Store
 Thumbs.db

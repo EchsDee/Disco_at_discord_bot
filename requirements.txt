@@ -1,4 +1,5 @@
 discord.py[voice]
+aiohttp
 python-dotenv
 yt-dlp
 pystray
