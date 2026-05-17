@@ -981,6 +981,16 @@ async def dashboard_update_bot(request: web.Request) -> web.Response:
     )
 
 
+async def dashboard_restart_bot(request: web.Request) -> web.Response:
+    acting_user = request.get("dashboard_user") or get_dashboard_user(request)
+    if not dashboard_user_is_superuser(request):
+        return web.json_response({"ok": False, "error": "Superuser access required."}, status=403)
+
+    log_event(f"Dashboard restart requested by {acting_user.get('name', 'unknown') if acting_user else 'unknown'}.")
+    bot.loop.call_later(1, lambda: os._exit(0))
+    return web.json_response({"ok": True, "message": "Restarting bot..."})
+
+
 async def dashboard_control(request: web.Request) -> web.Response:
     guild = bot.get_guild(int(request.match_info["guild_id"]))
     if guild is None:
@@ -1237,6 +1247,7 @@ async def start_dashboard() -> None:
     app.router.add_get("/api/login-users", dashboard_login_users)
     app.router.add_post("/api/login-users/{user_id}/superuser", dashboard_set_login_user_superuser)
     app.router.add_post("/api/update", dashboard_update_bot)
+    app.router.add_post("/api/restart", dashboard_restart_bot)
     app.router.add_post("/api/guilds/{guild_id}/control", dashboard_control)
 
     dashboard_runner = web.AppRunner(app)
@@ -1724,6 +1735,7 @@ DASHBOARD_HTML = """
         </div>
         <div class="controls" id="superuserControls">
           <button onclick="updateBot()">Update From Git</button>
+          <button class="danger" onclick="restartBot()">Restart Bot</button>
           <button onclick="refreshLogs()">Refresh Logs</button>
           <button onclick="refreshLoginUsers()">Refresh Users</button>
         </div>
@@ -2052,6 +2064,14 @@ DASHBOARD_HTML = """
         logBox.textContent += `\\n${data.output}`;
         logBox.scrollTop = logBox.scrollHeight;
       }
+    }
+
+    async function restartBot() {
+      if (!confirm("Restart the bot now? Music playback will stop for a moment.")) return;
+      adminToast.textContent = "Restarting bot...";
+      const response = await fetch("/api/restart", { method: "POST" });
+      const data = await response.json();
+      adminToast.textContent = data.message || data.error || "";
     }
 
     async function logoutDashboard() {
@@ -2424,6 +2444,12 @@ async def player_loop(ctx: commands.Context) -> None:
         await voice_client.disconnect()
 
 
+async def sync_commands_to_guild(guild: discord.Guild) -> None:
+    bot.tree.copy_global_to(guild=guild)
+    synced = await bot.tree.sync(guild=guild)
+    log_event(f"Synced {len(synced)} slash commands to {guild.name} ({guild.id})")
+
+
 @bot.event
 async def on_ready() -> None:
     global commands_synced, views_registered, dashboard_started, tray_started
@@ -2442,12 +2468,15 @@ async def on_ready() -> None:
 
     if not commands_synced:
         for guild in bot.guilds:
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            log_event(f"Synced {len(synced)} slash commands to {guild.name} ({guild.id})")
+            await sync_commands_to_guild(guild)
         commands_synced = True
 
     log_event(f"Logged in as {bot.user} (prefix: {COMMAND_PREFIX})")
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild) -> None:
+    await sync_commands_to_guild(guild)
 
 
 @commands.guild_only()
