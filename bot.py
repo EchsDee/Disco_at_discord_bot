@@ -538,7 +538,9 @@ async def send_clean(ctx: commands.Context, *args, **kwargs) -> discord.Message:
     if should_clean:
         await delete_previous_bot_message(ctx)
 
-    if channel.id == ctx.channel.id:
+    if isinstance(ctx, DashboardPlaybackContext):
+        message = await channel.send(*args, **kwargs)
+    elif channel.id == ctx.channel.id:
         message = await ctx.send(*args, ephemeral=ephemeral, **kwargs)
     else:
         message = await channel.send(*args, **kwargs)
