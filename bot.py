@@ -151,16 +151,25 @@ def make_dashboard_session(payload: dict) -> str:
 
 def get_dashboard_user(request: web.Request) -> Optional[dict]:
     if not dashboard_auth_enabled():
-        return {"id": "local", "name": "Local", "superuser": True, "guild_ids": "all"}
+        return {"type": "local", "id": "local", "name": "Local", "superuser": True, "guild_ids": "all"}
 
     encoded = verify_signed_value(request.cookies.get("dashboard_session", ""))
     if not encoded:
         return None
 
     try:
-        return json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
+        user = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
     except (json.JSONDecodeError, ValueError):
         return None
+
+    if user.get("type") == "discord":
+        user["superuser"] = dashboard_user_id_is_superuser(str(user.get("id", "")))
+        if user["superuser"]:
+            user["guild_ids"] = "all"
+        elif user.get("guild_ids") == "all":
+            user["guild_ids"] = []
+
+    return user
 
 
 def is_dashboard_session_valid(request: web.Request) -> bool:
@@ -240,16 +249,17 @@ playlist_ytdl = yt_dlp.YoutubeDL(
 
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
-        return {"music_channels": {}, "soundboards": {}}
+        return {"music_channels": {}, "soundboards": {}, "dashboard_superuser_ids": []}
 
     try:
         with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
             config = json.load(config_file)
     except (json.JSONDecodeError, OSError):
-        return {"music_channels": {}}
+        return {"music_channels": {}, "soundboards": {}, "dashboard_superuser_ids": []}
 
     config.setdefault("music_channels", {})
     config.setdefault("soundboards", {})
+    config.setdefault("dashboard_superuser_ids", [])
     return config
 
 
@@ -259,6 +269,30 @@ def save_config(config: dict) -> None:
 
 
 config = load_config()
+
+
+def dashboard_config_superuser_ids() -> set[str]:
+    return {str(user_id).strip() for user_id in config.get("dashboard_superuser_ids", []) if str(user_id).strip()}
+
+
+def dashboard_all_superuser_ids() -> set[str]:
+    return DASHBOARD_SUPERUSER_IDS | dashboard_config_superuser_ids()
+
+
+def dashboard_user_id_is_superuser(user_id: str) -> bool:
+    return str(user_id) in dashboard_all_superuser_ids()
+
+
+def set_dashboard_config_superuser(user_id: str, enabled: bool) -> None:
+    user_id = str(user_id).strip()
+    configured = dashboard_config_superuser_ids()
+    if enabled:
+        configured.add(user_id)
+    else:
+        configured.discard(user_id)
+
+    config["dashboard_superuser_ids"] = sorted(configured)
+    save_config(config)
 
 
 def find_ffmpeg_executable() -> str:
@@ -778,7 +812,7 @@ async def dashboard_discord_callback(request: web.Request) -> web.Response:
         raise web.HTTPUnauthorized(text="Could not load Discord account permissions.")
 
     discord_user_id = str(user_data["id"])
-    superuser = discord_user_id in DASHBOARD_SUPERUSER_IDS
+    superuser = dashboard_user_id_is_superuser(discord_user_id)
     admin_permission_bits = discord.Permissions(administrator=True).value | discord.Permissions(manage_guild=True).value
     allowed_guild_ids = []
     bot_guild_ids = {str(guild.id) for guild in bot.guilds}
@@ -832,6 +866,8 @@ async def dashboard_status(request: web.Request) -> web.Response:
                 "dashboard_url": dashboard_url(),
             },
             "user": {
+                "id": user.get("id", ""),
+                "type": user.get("type", ""),
                 "name": user.get("name", ""),
                 "avatar_url": user.get("avatar_url", ""),
                 "superuser": bool(user.get("superuser")),
@@ -852,12 +888,54 @@ async def dashboard_login_users(request: web.Request) -> web.Response:
     if not dashboard_user_is_superuser(request):
         return web.json_response({"ok": False, "error": "Superuser access required."}, status=403)
 
+    env_superuser_ids = DASHBOARD_SUPERUSER_IDS
+    config_superuser_ids = dashboard_config_superuser_ids()
     users = sorted(
-        dashboard_login_user_records.values(),
+        (
+            {
+                **user,
+                "superuser": dashboard_user_id_is_superuser(str(user.get("id", ""))),
+                "env_superuser": str(user.get("id", "")) in env_superuser_ids,
+                "config_superuser": str(user.get("id", "")) in config_superuser_ids,
+                "can_change_superuser": user.get("type") == "discord",
+            }
+            for user in dashboard_login_user_records.values()
+        ),
         key=lambda user: user.get("last_login", ""),
         reverse=True,
     )
     return web.json_response({"users": users})
+
+
+async def dashboard_set_login_user_superuser(request: web.Request) -> web.Response:
+    acting_user = request.get("dashboard_user") or get_dashboard_user(request)
+    if not dashboard_user_is_superuser(request):
+        return web.json_response({"ok": False, "error": "Superuser access required."}, status=403)
+
+    user_id = str(request.match_info["user_id"]).strip()
+    if not user_id or user_id in {"local", "password"}:
+        return web.json_response({"ok": False, "error": "Only Discord users can be changed."}, status=400)
+
+    data = await request.json()
+    enabled = bool(data.get("superuser"))
+
+    if not enabled and user_id in DASHBOARD_SUPERUSER_IDS:
+        return web.json_response({"ok": False, "error": "That user is set as a superuser in the .env file."}, status=400)
+    if not enabled and acting_user and str(acting_user.get("id")) == user_id:
+        return web.json_response({"ok": False, "error": "You cannot remove your own superuser access."}, status=400)
+
+    set_dashboard_config_superuser(user_id, enabled)
+    if user_id in dashboard_login_user_records:
+        dashboard_login_user_records[user_id]["superuser"] = dashboard_user_id_is_superuser(user_id)
+        dashboard_login_user_records[user_id]["guild_count"] = (
+            "all"
+            if dashboard_login_user_records[user_id]["superuser"]
+            else dashboard_login_user_records[user_id].get("guild_count", 0)
+        )
+
+    action = "promoted to" if enabled else "removed from"
+    log_event(f"Dashboard user {user_id} was {action} superuser by {acting_user.get('name', 'unknown') if acting_user else 'unknown'}.")
+    return web.json_response({"ok": True, "message": "Superuser access updated."})
 
 
 async def dashboard_update_bot(request: web.Request) -> web.Response:
@@ -1157,6 +1235,7 @@ async def start_dashboard() -> None:
     app.router.add_get("/api/status", dashboard_status)
     app.router.add_get("/api/logs", dashboard_logs)
     app.router.add_get("/api/login-users", dashboard_login_users)
+    app.router.add_post("/api/login-users/{user_id}/superuser", dashboard_set_login_user_superuser)
     app.router.add_post("/api/update", dashboard_update_bot)
     app.router.add_post("/api/guilds/{guild_id}/control", dashboard_control)
 
@@ -1450,7 +1529,7 @@ DASHBOARD_HTML = """
     }
     .login-user {
       display: grid;
-      grid-template-columns: 38px minmax(0, 1fr);
+      grid-template-columns: 38px minmax(0, 1fr) auto;
       gap: 10px;
       align-items: center;
       padding: 8px;
@@ -1606,6 +1685,8 @@ DASHBOARD_HTML = """
       .message-row { grid-template-columns: 1fr; }
       .play-row { grid-template-columns: 1fr; }
       .sound-item { grid-template-columns: 1fr; }
+      .login-user { grid-template-columns: 38px minmax(0, 1fr); }
+      .login-user .controls { grid-column: 1 / -1; }
       .admin-head { align-items: flex-start; flex-direction: column; }
     }
   </style>
@@ -1669,6 +1750,7 @@ DASHBOARD_HTML = """
     const guildNames = {};
     const drafts = {};
     const selectedVoiceChannels = {};
+    let currentDashboardUser = null;
 
     function esc(value) {
       return String(value ?? "").replace(/[&<>"']/g, char => ({
@@ -1807,6 +1889,7 @@ DASHBOARD_HTML = """
         end: active.selectionEnd
       } : null;
       saveDrafts();
+      currentDashboardUser = data.user || null;
       botStatus.textContent = `${data.bot.name} - ${data.bot.ready ? "online" : "starting"}`;
       dashboardUser.textContent = data.user && data.user.name ? `Logged in as ${data.user.name}` : "";
       if (data.user && data.user.avatar_url) {
@@ -1926,8 +2009,37 @@ DASHBOARD_HTML = """
             <div class="meta">${esc(user.type)} - ${esc(user.id)} - ${user.superuser ? "superuser" : "server admin"} - servers: ${esc(user.guild_count)}</div>
             <div class="meta">Last login: ${esc(user.last_login)}</div>
           </div>
+          ${superuserAction(user)}
         </div>
       `).join("");
+    }
+
+    function superuserAction(user) {
+      if (!user.can_change_superuser) {
+        return `<div class="meta">Local login</div>`;
+      }
+      if (user.env_superuser) {
+        return `<div class="meta">Env superuser</div>`;
+      }
+      if (currentDashboardUser && user.id === currentDashboardUser.id) {
+        return `<div class="meta">You</div>`;
+      }
+      if (user.superuser) {
+        return `<div class="controls"><button class="danger" onclick="setLoginUserSuperuser('${esc(user.id)}', false)">Remove Superuser</button></div>`;
+      }
+      return `<div class="controls"><button onclick="setLoginUserSuperuser('${esc(user.id)}', true)">Make Superuser</button></div>`;
+    }
+
+    async function setLoginUserSuperuser(userId, superuser) {
+      adminToast.textContent = superuser ? "Promoting user..." : "Removing superuser access...";
+      const response = await fetch(`/api/login-users/${encodeURIComponent(userId)}/superuser`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ superuser })
+      });
+      const data = await response.json();
+      adminToast.textContent = data.message || data.error || "";
+      await refreshLoginUsers();
     }
 
     async function updateBot() {
