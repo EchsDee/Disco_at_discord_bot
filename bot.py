@@ -204,7 +204,7 @@ def visible_dashboard_guilds(request: web.Request) -> list[discord.Guild]:
 @web.middleware
 async def dashboard_auth_middleware(request: web.Request, handler):
     public_paths = {"/login", "/api/login", "/auth/discord/start", "/auth/discord/callback"}
-    if request.path in public_paths:
+    if request.path in public_paths or request.path.startswith("/static/"):
         return await handler(request)
 
     user = get_dashboard_user(request)
