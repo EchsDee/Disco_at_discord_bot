@@ -50,7 +50,7 @@ DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
 DASHBOARD_SUPERUSER_IDS = {
     user_id.strip()
-    for user_id in os.getenv("DASHBOARD_SUPERUSER_IDS", "257231933782622210").split(",")
+    for user_id in os.getenv("DASHBOARD_SUPERUSER_IDS", "").split(",")
     if user_id.strip()
 }
 ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
@@ -676,11 +676,18 @@ def guild_to_payload(guild: discord.Guild) -> dict:
     voice_client = guild.voice_client
     music_channel_id = get_music_channel_id(guild.id)
     music_channel = guild.get_channel(music_channel_id) if music_channel_id else None
+    online_count = (
+        sum(1 for member in guild.members if member.status != discord.Status.offline)
+        if bot.intents.presences
+        else None
+    )
 
     return {
         "id": str(guild.id),
         "name": guild.name,
         "icon_url": str(guild.icon.url) if guild.icon else "",
+        "member_count": guild.member_count or len(guild.members),
+        "online_count": online_count,
         "music_channel": {
             "id": str(music_channel.id),
             "name": music_channel.name,
@@ -716,6 +723,7 @@ async def dashboard_login_page(request: web.Request) -> web.Response:
 
     html = (
         DASHBOARD_LOGIN_HTML.replace("{{DISCORD_LOGIN_DISPLAY}}", "flex" if discord_oauth_enabled() else "none")
+        .replace("{{BOT_AVATAR_URL}}", str(bot.user.display_avatar.url) if bot.user else "")
         .replace(
             "{{CONFIG_MESSAGE}}",
             "" if discord_oauth_enabled() else "Discord OAuth is not configured yet. Set DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, and DASHBOARD_PUBLIC_URL.",
@@ -853,6 +861,7 @@ async def dashboard_status(request: web.Request) -> web.Response:
                 "name": str(bot.user) if bot.user else "Starting...",
                 "ready": bot.is_ready(),
                 "dashboard_url": dashboard_url(),
+                "avatar_url": str(bot.user.display_avatar.url) if bot.user else "",
             },
             "user": {
                 "id": user.get("id", ""),
@@ -1013,6 +1022,25 @@ async def dashboard_control(request: web.Request) -> web.Response:
             voice_client.stop()
             return web.json_response({"ok": True, "message": "Skipped."})
         return web.json_response({"ok": False, "error": "Nothing is playing."}, status=400)
+
+    if action == "play_queue_index":
+        try:
+            queue_index = int(data.get("index", -1))
+        except (TypeError, ValueError):
+            queue_index = -1
+
+        queue_items = list(state.queue._queue)
+        if queue_index < 0 or queue_index >= len(queue_items):
+            return web.json_response({"ok": False, "error": "That queue item is not available."}, status=400)
+
+        selected_track = queue_items.pop(queue_index)
+        state.queue._queue.clear()
+        state.queue._queue.appendleft(selected_track)
+        state.queue._queue.extend(queue_items)
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            voice_client.stop()
+            return web.json_response({"ok": True, "message": f"Playing next: {selected_track.title}."})
+        return web.json_response({"ok": True, "message": f"Moved to the front: {selected_track.title}."})
 
     if action == "stop":
         while not state.queue.empty():

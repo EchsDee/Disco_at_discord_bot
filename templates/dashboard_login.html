@@ -4,14 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Disco at Discord Login</title>
-  <link rel="stylesheet" href="/static/dashboard_login.css?v=20260518-login">
+  <link rel="stylesheet" href="/static/dashboard_login.css?v=20260518-avatar">
 </head>
 <body>
   <main class="login-shell">
     <section class="brand-panel">
-      <div class="brand-mark" aria-hidden="true">
-        <span></span><span></span><span></span><span></span>
-      </div>
+      <img class="login-bot-avatar" src="{{BOT_AVATAR_URL}}" alt="">
       <div>
         <p class="eyebrow">Private music console</p>
         <h1>Disco at Discord</h1>
@@ -20,7 +18,7 @@
     </section>
 
     <section class="login-card">
-      <div class="orb" aria-hidden="true"></div>
+      <img class="login-bot-avatar hero-avatar" src="{{BOT_AVATAR_URL}}" alt="">
       <p class="eyebrow">Welcome Back</p>
       <h2>Sign in with Discord</h2>
       <p class="muted">Discord login keeps the dashboard tied to your server permissions and superuser list.</p>
@@ -34,6 +32,6 @@
       <div class="status">{{CONFIG_MESSAGE}}</div>
     </section>
   </main>
-  <script src="/static/dashboard_login.js?v=20260518-login"></script>
+  <script src="/static/dashboard_login.js?v=20260518-avatar"></script>
 </body>
 </html>

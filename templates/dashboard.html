@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Disco at Discord</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260518-sidebar">
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260518-tabs">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Dashboard navigation">
       <div class="sidebar-brand">
-        <div class="brand-orb"></div>
+        <img class="brand-avatar" id="botAvatar" alt="">
         <div>
           <div class="brand-name">Disco</div>
           <div class="brand-sub">Discord bot</div>
@@ -19,25 +19,25 @@
 
       <nav class="sidebar-nav">
         <button class="nav-item" id="navServers" onclick="setView('servers')" type="button">
-          <span class="nav-icon">⌂</span>
+          <span class="nav-icon">S</span>
           <span>Servers</span>
         </button>
 
         <div class="nav-group">
           <button class="nav-item nav-parent" onclick="toggleNavGroup('controlGroup')" type="button">
-            <span class="nav-icon">▦</span>
+            <span class="nav-icon">C</span>
             <span>Control</span>
-            <span class="chevron" id="controlGroupChevron">⌄</span>
+            <span class="chevron" id="controlGroupChevron">v</span>
           </button>
           <div class="nav-children open" id="controlGroup">
-            <button class="nav-child active" id="navDashboard" onclick="setView('servers')" type="button">Dashboard</button>
-            <button class="nav-child" onclick="setView('servers')" type="button">Soundboard</button>
-            <button class="nav-child" onclick="setView('servers')" type="button">Queue</button>
+            <button class="nav-child active" id="navDashboard" onclick="setView('dashboard')" type="button">Dashboard</button>
+            <button class="nav-child" id="navSoundboard" onclick="setView('soundboard')" type="button">Soundboard</button>
+            <button class="nav-child" id="navQueue" onclick="setView('queue')" type="button">Queue</button>
           </div>
         </div>
 
         <button class="nav-item" id="navAdmin" onclick="setView('admin')" type="button" hidden>
-          <span class="nav-icon">⚙</span>
+          <span class="nav-icon">A</span>
           <span>Admin</span>
         </button>
       </nav>
@@ -49,6 +49,17 @@
           <h1>Disco at Discord</h1>
         </div>
         <div class="header-right">
+          <div class="server-picker" id="serverPicker">
+            <button class="server-picker-button" id="serverPickerButton" onclick="toggleServerPicker()" type="button">
+              <img class="server-picker-icon" id="selectedGuildIcon" alt="">
+              <span class="server-picker-copy">
+                <span id="selectedGuildName">Select a server</span>
+                <span class="meta" id="selectedGuildMeta">No server selected</span>
+              </span>
+              <span class="chevron" id="serverPickerChevron">v</span>
+            </button>
+            <div class="server-menu" id="serverMenu"></div>
+          </div>
           <div class="user-card">
             <img class="user-avatar" id="dashboardAvatar" alt="">
             <div>
@@ -60,8 +71,17 @@
         </div>
       </header>
       <main>
-        <section class="dashboard-page" id="serversPage">
+        <section class="dashboard-page" id="serversPage" style="display: none;">
           <div id="servers"></div>
+        </section>
+        <section class="dashboard-page" id="dashboardPage">
+          <div id="dashboardContent"></div>
+        </section>
+        <section class="dashboard-page" id="soundboardPage" style="display: none;">
+          <div id="soundboardContent"></div>
+        </section>
+        <section class="dashboard-page" id="queuePage" style="display: none;">
+          <div id="queueContent"></div>
         </section>
         <section class="admin dashboard-page" id="adminPage" style="display: none;">
           <div class="admin-head">
@@ -85,7 +105,7 @@
       </main>
     </div>
   </div>
-  <script src="/static/dashboard.js?v=20260518-sidebar"></script>
+  <script src="/static/dashboard.js?v=20260518-tabs"></script>
 </body>
 </html>
 

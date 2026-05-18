@@ -152,16 +152,16 @@ body::before {
   background: radial-gradient(circle, rgba(124, 60, 255, 0.72), transparent 62%);
 }
 
-.brand-mark {
+.brand-mark,
+.login-bot-avatar {
   width: 44px;
   height: 44px;
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 3px;
-  padding: 5px;
-  border-radius: 13px;
+  display: block;
+  border-radius: 14px;
   background: rgba(212, 255, 79, 0.16);
   border: 1px solid rgba(212, 255, 79, 0.4);
+  object-fit: cover;
+  box-shadow: 0 0 30px rgba(124, 60, 255, 0.42);
 }
 
 .brand-mark span {
@@ -214,14 +214,18 @@ h2 {
   padding: 34px;
 }
 
-.orb {
+.hero-avatar {
   width: 78px;
   height: 78px;
   border-radius: 50%;
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 0 42px rgba(124, 60, 255, 0.5);
+}
+
+.login-bot-avatar[src=""] {
   background:
     radial-gradient(circle at 30% 30%, #fff, transparent 23%),
     linear-gradient(135deg, var(--lime), var(--purple));
-  box-shadow: 0 0 42px rgba(124, 60, 255, 0.5);
 }
 
 .discord-login {
