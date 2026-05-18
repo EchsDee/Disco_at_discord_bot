@@ -103,6 +103,15 @@ The dashboard shows each server, current song, voice status, queue, saved soundb
 
 Uploaded soundboard files are stored in `soundboard_files/`, which is ignored by Git.
 
+## Project Structure
+
+- `main.py`: application entrypoint
+- `bot.py`: bot setup, dashboard API, playback state, and shared helpers
+- `commands.py`: Discord slash/prefix command registration
+- `templates/dashboard.html`: dashboard markup
+- `static/dashboard.css`: dashboard styles
+- `static/dashboard.js`: dashboard browser logic
+
 ## Notes
 
 This bot streams audio with `yt-dlp` and FFmpeg. YouTube may change behavior over time, so update dependencies if playback stops working:
