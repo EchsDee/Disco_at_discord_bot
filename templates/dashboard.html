@@ -7,49 +7,84 @@
   <link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
-  <header>
-    <div class="nav-left">
-      <select class="view-select" id="viewSelect" onchange="setView(this.value)" aria-label="Dashboard page">
-        <option value="servers">Servers</option>
-        <option value="admin" id="adminOption" hidden>Admin</option>
-      </select>
-      <h1>Disco at Discord</h1>
-    </div>
-    <div class="header-right">
-      <div class="user-card">
-        <img class="user-avatar" id="dashboardAvatar" alt="">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Dashboard navigation">
+      <div class="sidebar-brand">
+        <div class="brand-orb"></div>
         <div>
-          <div class="status" id="botStatus">Loading...</div>
-          <div class="meta" id="dashboardUser"></div>
+          <div class="brand-name">Disco</div>
+          <div class="brand-sub">Discord bot</div>
         </div>
       </div>
-      <button onclick="logoutDashboard()">Log Out</button>
+
+      <nav class="sidebar-nav">
+        <button class="nav-item" id="navServers" onclick="setView('servers')" type="button">
+          <span class="nav-icon">⌂</span>
+          <span>Servers</span>
+        </button>
+
+        <div class="nav-group">
+          <button class="nav-item nav-parent" onclick="toggleNavGroup('controlGroup')" type="button">
+            <span class="nav-icon">▦</span>
+            <span>Control</span>
+            <span class="chevron" id="controlGroupChevron">⌄</span>
+          </button>
+          <div class="nav-children open" id="controlGroup">
+            <button class="nav-child active" id="navDashboard" onclick="setView('servers')" type="button">Dashboard</button>
+            <button class="nav-child" onclick="setView('servers')" type="button">Soundboard</button>
+            <button class="nav-child" onclick="setView('servers')" type="button">Queue</button>
+          </div>
+        </div>
+
+        <button class="nav-item" id="navAdmin" onclick="setView('admin')" type="button" hidden>
+          <span class="nav-icon">⚙</span>
+          <span>Admin</span>
+        </button>
+      </nav>
+    </aside>
+
+    <div class="content-shell">
+      <header>
+        <div class="nav-left">
+          <h1>Disco at Discord</h1>
+        </div>
+        <div class="header-right">
+          <div class="user-card">
+            <img class="user-avatar" id="dashboardAvatar" alt="">
+            <div>
+              <div class="status" id="botStatus">Loading...</div>
+              <div class="meta" id="dashboardUser"></div>
+            </div>
+          </div>
+          <button onclick="logoutDashboard()">Log Out</button>
+        </div>
+      </header>
+      <main>
+        <section class="dashboard-page" id="serversPage">
+          <div id="servers"></div>
+        </section>
+        <section class="admin dashboard-page" id="adminPage" style="display: none;">
+          <div class="admin-head">
+            <div>
+              <h3>Admin Tools</h3>
+              <div class="meta">Superuser-only controls for maintenance and logs.</div>
+              <div class="toast" id="adminToast"></div>
+            </div>
+            <div class="controls" id="superuserControls">
+              <button onclick="updateBot()">Update From Git</button>
+              <button class="danger" onclick="restartBot()">Restart Bot</button>
+              <button onclick="refreshLogs()">Refresh Logs</button>
+              <button onclick="refreshLoginUsers()">Refresh Users</button>
+            </div>
+          </div>
+          <h3>Dashboard Logins</h3>
+          <div class="login-users" id="loginUsers">Only superusers can see dashboard logins.</div>
+          <h3>Logs</h3>
+          <div class="log-box" id="logBox">Logs are only visible to superusers.</div>
+        </section>
+      </main>
     </div>
-  </header>
-  <main>
-    <section class="dashboard-page" id="serversPage">
-      <div id="servers"></div>
-    </section>
-    <section class="admin dashboard-page" id="adminPage" style="display: none;">
-      <div class="admin-head">
-        <div>
-          <h3>Admin Tools</h3>
-          <div class="meta">Superuser-only controls for maintenance and logs.</div>
-          <div class="toast" id="adminToast"></div>
-        </div>
-        <div class="controls" id="superuserControls">
-          <button onclick="updateBot()">Update From Git</button>
-          <button class="danger" onclick="restartBot()">Restart Bot</button>
-          <button onclick="refreshLogs()">Refresh Logs</button>
-          <button onclick="refreshLoginUsers()">Refresh Users</button>
-        </div>
-      </div>
-      <h3>Dashboard Logins</h3>
-      <div class="login-users" id="loginUsers">Only superusers can see dashboard logins.</div>
-      <h3>Logs</h3>
-      <div class="log-box" id="logBox">Logs are only visible to superusers.</div>
-    </section>
-  </main>
+  </div>
   <script src="/static/dashboard.js"></script>
 </body>
 </html>

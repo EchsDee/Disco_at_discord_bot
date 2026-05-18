@@ -1,8 +1,9 @@
 ﻿    const servers = document.getElementById("servers");
     const serversPage = document.getElementById("serversPage");
     const adminPage = document.getElementById("adminPage");
-    const viewSelect = document.getElementById("viewSelect");
-    const adminOption = document.getElementById("adminOption");
+    const navServers = document.getElementById("navServers");
+    const navDashboard = document.getElementById("navDashboard");
+    const navAdmin = document.getElementById("navAdmin");
     const botStatus = document.getElementById("botStatus");
     const adminToast = document.getElementById("adminToast");
     const logBox = document.getElementById("logBox");
@@ -14,6 +15,7 @@
     const drafts = {};
     const selectedVoiceChannels = {};
     let currentDashboardUser = null;
+    let activeView = "servers";
 
     function esc(value) {
       return String(value ?? "").replace(/[&<>"']/g, char => ({
@@ -26,17 +28,32 @@
     }
 
     function currentView() {
-      return viewSelect.value || "servers";
+      return activeView;
     }
 
     function setView(view) {
-      const target = view === "admin" && !adminOption.hidden ? "admin" : "servers";
-      viewSelect.value = target;
+      const target = view === "admin" && !navAdmin.hidden ? "admin" : "servers";
+      activeView = target;
       serversPage.style.display = target === "servers" ? "grid" : "none";
       adminPage.style.display = target === "admin" ? "grid" : "none";
+      navServers.classList.remove("active");
+      navDashboard.classList.toggle("active", target === "servers");
+      navAdmin.classList.toggle("active", target === "admin");
       if (target === "admin") {
         refreshLogs();
         refreshLoginUsers();
+      }
+    }
+
+    function toggleNavGroup(groupId) {
+      const group = document.getElementById(groupId);
+      const chevron = document.getElementById(`${groupId}Chevron`);
+      if (!group) {
+        return;
+      }
+      const isOpen = group.classList.toggle("open");
+      if (chevron) {
+        chevron.textContent = isOpen ? "⌄" : "›";
       }
     }
 
@@ -163,7 +180,7 @@
         dashboardAvatar.style.display = "none";
       }
       const isSuperuser = Boolean(data.user && data.user.superuser);
-      adminOption.hidden = !isSuperuser;
+      navAdmin.hidden = !isSuperuser;
       superuserControls.style.display = isSuperuser ? "flex" : "none";
       if (!isSuperuser && currentView() === "admin") {
         setView("servers");

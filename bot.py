@@ -809,7 +809,22 @@ async def dashboard_discord_callback(request: web.Request) -> web.Response:
         "superuser": superuser,
         "guild_ids": "all" if superuser else allowed_guild_ids,
     }
-    response = web.HTTPFound("/")
+    response = web.Response(
+        text="""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Signing in...</title>
+  <meta http-equiv="refresh" content="0; url=/">
+</head>
+<body>
+  <script>window.location.replace("/");</script>
+  Signed in. Redirecting to the dashboard...
+</body>
+</html>""",
+        content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
     response.set_cookie(
         "dashboard_session",
         make_dashboard_session(login_user),
@@ -821,7 +836,7 @@ async def dashboard_discord_callback(request: web.Request) -> web.Response:
     response.del_cookie("dashboard_oauth_state", path="/")
     record_dashboard_login(login_user)
     log_event(f"Discord dashboard login succeeded for {display_name} ({discord_user_id}).")
-    raise response
+    return response
 
 
 async def dashboard_logout(request: web.Request) -> web.Response:
