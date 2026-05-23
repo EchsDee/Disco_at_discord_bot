@@ -11,6 +11,7 @@ venv/
 *.log
 bot_config.json
 soundboard_files/
+oracle-cloud-init.yml
 
 *.key
 *.key.pub
