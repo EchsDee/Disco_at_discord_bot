@@ -52,9 +52,9 @@ def register_music_commands(app: dict) -> None:
         await ctx.send(f"Music bot channel set to {channel.mention}.", ephemeral=bool(ctx.interaction))
 
     @commands.guild_only()
-    @bot.hybrid_command(name="play", aliases=["p"], description="Play a YouTube URL or search term.")
+    @bot.hybrid_command(name="play", aliases=["p"], description="Play a YouTube/Spotify URL or search term.")
     async def play(ctx: commands.Context, *, query: str) -> None:
-        """Play a YouTube URL or search term."""
+        """Play a YouTube/Spotify URL or search term."""
         acknowledged = await acknowledge_music_routing(ctx)
 
         if ctx.interaction and not acknowledged:
@@ -157,6 +157,6 @@ def register_music_commands(app: dict) -> None:
     @bot.event
     async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
         if isinstance(error, commands.MissingRequiredArgument):
-            await send_clean(ctx, f"Missing argument. Try `{command_prefix}{ctx.command} <YouTube URL or search>`.")
+            await send_clean(ctx, f"Missing argument. Try `{command_prefix}{ctx.command} <YouTube/Spotify URL or search>`.")
         else:
             await send_clean(ctx, str(error))

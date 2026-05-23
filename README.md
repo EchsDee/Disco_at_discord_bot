@@ -1,6 +1,6 @@
 # Python Discord YouTube Music Bot
 
-A small Discord music bot that joins your voice channel and plays audio from YouTube URLs or search terms.
+A small Discord music bot that joins your voice channel and plays audio from YouTube URLs, Spotify links, playlists, or search terms.
 
 ## Setup
 
@@ -58,7 +58,7 @@ A small Discord music bot that joins your voice channel and plays audio from You
 Commands work as Discord slash commands and as prefix commands.
 
 - `/setup_music_channel [name]`: create or set the dedicated music text channel
-- `/play <YouTube URL, playlist, or search>` or `!play <YouTube URL, playlist, or search>`: queue a song or playlist and start playback
+- `/play <YouTube/Spotify URL, playlist, or search>` or `!play <YouTube/Spotify URL, playlist, or search>`: queue a song or playlist and start playback
 - `/pause` or `!pause`: pause playback
 - `/resume` or `!resume`: resume playback
 - `/skip` or `!skip`: skip the current song
@@ -98,8 +98,10 @@ Dashboard settings:
 - `YTDL_COOKIE_FILE=`: optional path to a Netscape-format YouTube cookies file for hosted servers
 - `YTDL_FORMAT=bestaudio/best`: yt-dlp format selector
 - `YTDL_JS_RUNTIME=`: optional JavaScript runtime for yt-dlp challenge solving, for example `deno`
+- `SPOTIFY_CLIENT_ID=` and `SPOTIFY_CLIENT_SECRET=`: optional Spotify app credentials for Spotify track, album, and playlist links
+- `SPOTIFY_MARKET=US`: Spotify market used when resolving available tracks
 
-The dashboard shows each server, current song, voice status, queue, saved soundboard, and recent bot logs. It can pause, resume, skip, stop, disconnect from voice, start music from a URL/search/playlist, save soundboard buttons from YouTube searches/URLs/playlists or uploaded local files, play saved sounds, send a message as the bot to the configured music channel, update the bot from Git, or remove the bot from a server.
+The dashboard shows each server, current song, voice status, queue, saved soundboard, and recent bot logs. It can pause, resume, skip, stop, disconnect from voice, start music from a URL/search/playlist, save soundboard buttons from YouTube or Spotify searches/URLs/playlists or uploaded local files, play saved sounds, send a message as the bot to the configured music channel, update the bot from Git, or remove the bot from a server.
 
 Uploaded soundboard files are stored in `soundboard_files/`, which is ignored by Git.
 

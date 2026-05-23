@@ -59,6 +59,9 @@ YTDL_EXTRACT_TIMEOUT_SECONDS = int(os.getenv("YTDL_EXTRACT_TIMEOUT_SECONDS", "90
 YTDL_COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE")
 YTDL_FORMAT = os.getenv("YTDL_FORMAT", "bestaudio/best")
 YTDL_JS_RUNTIME = os.getenv("YTDL_JS_RUNTIME")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+SPOTIFY_MARKET = os.getenv("SPOTIFY_MARKET", "US")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN. Put it in a .env file or environment variable.")
@@ -245,6 +248,8 @@ playlist_ytdl = yt_dlp.YoutubeDL(
         "playlistend": MAX_PLAYLIST_TRACKS,
     }
 )
+spotify_access_token = ""
+spotify_token_expires_at = 0.0
 
 
 def load_config() -> dict:
@@ -1333,6 +1338,138 @@ def looks_like_playlist_query(query: str) -> bool:
     return "list" in query_values or "/playlist" in parsed.path
 
 
+def spotify_resource_from_query(query: str) -> Optional[tuple[str, str]]:
+    query = query.strip()
+    if query.startswith("spotify:"):
+        parts = query.split(":")
+        if len(parts) >= 3 and parts[1] in {"track", "album", "playlist"} and parts[2]:
+            return parts[1], parts[2]
+        return None
+
+    parsed = urlparse(query)
+    host = parsed.netloc.lower()
+    if host not in {"open.spotify.com", "play.spotify.com"}:
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    for index, part in enumerate(parts):
+        if part in {"track", "album", "playlist"} and index + 1 < len(parts):
+            return part, parts[index + 1]
+    return None
+
+
+async def spotify_token() -> str:
+    global spotify_access_token, spotify_token_expires_at
+
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        raise commands.CommandError(
+            "Spotify links need SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in the .env file."
+        )
+
+    if spotify_access_token and time.time() < spotify_token_expires_at - 60:
+        return spotify_access_token
+
+    credentials = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode("utf-8")
+    headers = {
+        "Authorization": "Basic " + base64.b64encode(credentials).decode("ascii"),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    async with ClientSession() as session:
+        async with session.post(
+            "https://accounts.spotify.com/api/token",
+            data={"grant_type": "client_credentials"},
+            headers=headers,
+        ) as response:
+            data = await response.json(content_type=None)
+            if response.status >= 400:
+                error = data.get("error_description") or data.get("error") or "Spotify authentication failed."
+                raise commands.CommandError(error)
+
+    spotify_access_token = data["access_token"]
+    spotify_token_expires_at = time.time() + int(data.get("expires_in", 3600))
+    return spotify_access_token
+
+
+async def spotify_api_get(path: str, params: Optional[dict[str, str | int]] = None) -> dict:
+    token = await spotify_token()
+    url = f"https://api.spotify.com/v1{path}"
+    if params:
+        url += "?" + urlencode(params)
+
+    async with ClientSession() as session:
+        async with session.get(url, headers={"Authorization": f"Bearer {token}"}) as response:
+            data = await response.json(content_type=None)
+            if response.status >= 400:
+                error = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else None
+                raise commands.CommandError(error or "Spotify request failed.")
+            return data
+
+
+def spotify_track_search(track: dict) -> Optional[str]:
+    if not track or track.get("is_local") or track.get("type") != "track":
+        return None
+
+    artists = ", ".join(artist.get("name", "") for artist in track.get("artists", []) if artist.get("name"))
+    name = track.get("name", "").strip()
+    if not name:
+        return None
+    return f"{artists} - {name} official audio" if artists else f"{name} official audio"
+
+
+async def spotify_paged_tracks(path: str, item_getter, limit: int, page_size: int = 100) -> list[str]:
+    searches = []
+    offset = 0
+
+    while len(searches) < limit:
+        page_limit = min(page_size, limit - len(searches))
+        data = await spotify_api_get(path, {"limit": page_limit, "offset": offset, "market": SPOTIFY_MARKET})
+        items = data.get("items") or []
+        if not items:
+            break
+
+        for item in items:
+            search = spotify_track_search(item_getter(item))
+            if search:
+                searches.append(search)
+                if len(searches) >= limit:
+                    break
+
+        if not data.get("next"):
+            break
+        offset += len(items)
+
+    return searches
+
+
+async def spotify_search_queries(query: str) -> Optional[list[str]]:
+    resource = spotify_resource_from_query(query)
+    if not resource:
+        return None
+
+    resource_type, resource_id = resource
+    if resource_type == "track":
+        data = await spotify_api_get(f"/tracks/{resource_id}", {"market": SPOTIFY_MARKET})
+        search = spotify_track_search(data)
+        return [search] if search else []
+
+    if resource_type == "album":
+        return await spotify_paged_tracks(
+            f"/albums/{resource_id}/tracks",
+            lambda item: {**item, "type": "track"},
+            MAX_PLAYLIST_TRACKS,
+            page_size=50,
+        )
+
+    if resource_type == "playlist":
+        return await spotify_paged_tracks(
+            f"/playlists/{resource_id}/tracks",
+            lambda item: item.get("track") or {},
+            MAX_PLAYLIST_TRACKS,
+        )
+
+    return []
+
+
 def track_from_data(data: dict, query: str, requester: str) -> Track:
     thumbnail_url = data.get("thumbnail")
     thumbnails = data.get("thumbnails") or []
@@ -1351,6 +1488,28 @@ def track_from_data(data: dict, query: str, requester: str) -> Track:
 
 async def extract_tracks(query: str, requester: str) -> list[Track]:
     loop = asyncio.get_running_loop()
+    spotify_queries = await spotify_search_queries(query)
+    if spotify_queries is not None:
+        if not spotify_queries:
+            raise commands.CommandError("No playable Spotify tracks found.")
+
+        tracks = []
+        log_event(f"Resolving Spotify media for {requester}: {len(spotify_queries)} track(s)")
+        for index, search_query in enumerate(spotify_queries[:MAX_PLAYLIST_TRACKS], start=1):
+            log_event(f"Searching YouTube for Spotify item {index}/{len(spotify_queries)}: {search_query}")
+            data = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda item_query=search_query: ytdl.extract_info(f"ytsearch1:{item_query}", download=False)),
+                timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
+            )
+            entries = [entry for entry in data.get("entries", []) if entry] if "entries" in data else []
+            if entries:
+                tracks.append(track_from_data(entries[0], search_query, requester))
+
+        if not tracks:
+            raise commands.CommandError("No playable YouTube matches found for that Spotify link.")
+        log_event(f"Resolved Spotify link to {len(tracks)} playable track(s) for {requester}")
+        return tracks
+
     extractor = playlist_ytdl if looks_like_playlist_query(query) else ytdl
     log_event(f"Extracting media for {requester}: {query}")
     data = await asyncio.wait_for(

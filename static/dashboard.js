@@ -157,7 +157,7 @@ function dashboardActions(guild) {
     <div class="action-panel">
       <h3>Start Music</h3>
       <div class="play-row">
-        <input id="play-${guild.id}" placeholder="YouTube URL, playlist, or search">
+        <input id="play-${guild.id}" placeholder="YouTube, Spotify, playlist, or search">
         <select id="voice-${guild.id}">
           ${voiceOptions(guild, selectedVoiceChannels[`voice-${guild.id}`])}
         </select>
@@ -309,7 +309,7 @@ function renderGuildViews() {
         <h3>Add Sound</h3>
         <div class="play-row">
           <input id="sound-name-${guild.id}" maxlength="40" placeholder="Sound name">
-          <input id="sound-query-${guild.id}" placeholder="YouTube URL, playlist, or search">
+          <input id="sound-query-${guild.id}" placeholder="YouTube, Spotify, playlist, or search">
           <button onclick="addSound('${guild.id}')">Add Sound</button>
         </div>
         <div class="play-row">
@@ -565,7 +565,7 @@ async function playFromDashboard(guildId) {
   const query = input ? input.value.trim() : "";
 
   if (!query) {
-    if (toast) toast.textContent = "Enter a YouTube URL or search.";
+    if (toast) toast.textContent = "Enter a YouTube/Spotify URL or search.";
     return;
   }
 
