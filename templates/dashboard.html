@@ -95,7 +95,7 @@
               <button class="danger" onclick="restartBot()">Restart Bot</button>
               <button onclick="refreshLogs()">Refresh Logs</button>
               <button onclick="refreshLoginUsers()">Refresh Users</button>
-              <button onclick="connectSpotify()">Connect Spotify</button>
+              <button onclick="window.location.href='/auth/spotify/start'" type="button">Connect Spotify</button>
             </div>
           </div>
           <div class="meta" id="spotifyStatus">Spotify status loading...</div>
@@ -107,7 +107,7 @@
       </main>
     </div>
   </div>
-  <script src="/static/dashboard.js?v=20260518-tabs"></script>
+  <script src="/static/dashboard.js?v=20260523-spotify-oauth"></script>
 </body>
 </html>
 
