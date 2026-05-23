@@ -77,7 +77,7 @@ views_registered = False
 dashboard_started = False
 tray_started = False
 dashboard_runner: Optional[web.AppRunner] = None
-recent_logs: deque[str] = deque(maxlen=200)
+recent_logs: deque[str] = deque(maxlen=500)
 dashboard_login_user_records: dict[str, dict] = {}
 
 
@@ -86,6 +86,10 @@ def log_event(message: str) -> None:
     line = f"[{timestamp}] {message}"
     recent_logs.append(line)
     print(line, flush=True)
+
+
+def log_error(context: str, error: Exception) -> None:
+    log_event(f"{context}: {type(error).__name__}: {error}")
 
 
 def record_dashboard_login(user: dict) -> None:
@@ -1114,6 +1118,7 @@ async def dashboard_control(request: web.Request) -> web.Response:
         try:
             tracks = await extract_tracks(query, "Dashboard")
         except Exception as exc:
+            log_error("Dashboard play failed", exc)
             return web.json_response({"ok": False, "error": f"Could not load that track: {exc}"}, status=400)
         await queue_tracks(state, tracks)
 
@@ -1221,6 +1226,7 @@ async def dashboard_control(request: web.Request) -> web.Response:
             try:
                 tracks = await extract_tracks(query, f"Soundboard: {sound['name']}")
             except Exception as exc:
+                log_error("Dashboard soundboard playback failed", exc)
                 return web.json_response({"ok": False, "error": f"Could not load that sound: {exc}"}, status=400)
         await queue_tracks(state, tracks)
 
@@ -1383,7 +1389,11 @@ async def spotify_token() -> str:
             data = await response.json(content_type=None)
             if response.status >= 400:
                 error = data.get("error_description") or data.get("error") or "Spotify authentication failed."
-                raise commands.CommandError(error)
+                if error == "invalid_client":
+                    raise commands.CommandError(
+                        "Spotify rejected the client ID/secret. Re-copy both values from the Spotify Developer Dashboard and restart the bot."
+                    )
+                raise commands.CommandError(f"Spotify authentication failed ({response.status}): {error}")
 
     spotify_access_token = data["access_token"]
     spotify_token_expires_at = time.time() + int(data.get("expires_in", 3600))
@@ -1401,7 +1411,11 @@ async def spotify_api_get(path: str, params: Optional[dict[str, str | int]] = No
             data = await response.json(content_type=None)
             if response.status >= 400:
                 error = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else None
-                raise commands.CommandError(error or "Spotify request failed.")
+                if response.status == 403 and path.startswith("/playlists/"):
+                    raise commands.CommandError(
+                        "Spotify returned 403 Forbidden for that playlist. Make sure the playlist is public and accessible by link; private playlists need a user-login Spotify flow that this bot does not use yet."
+                    )
+                raise commands.CommandError(f"Spotify request failed ({response.status}): {error or 'Unknown error'}")
             return data
 
 

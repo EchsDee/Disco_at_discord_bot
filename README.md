@@ -101,6 +101,8 @@ Dashboard settings:
 - `SPOTIFY_CLIENT_ID=` and `SPOTIFY_CLIENT_SECRET=`: optional Spotify app credentials for Spotify track, album, and playlist links
 - `SPOTIFY_MARKET=US`: Spotify market used when resolving available tracks
 
+Spotify playback uses Spotify metadata and YouTube audio search. Public Spotify tracks, albums, and playlists can be resolved with the app credentials above. Private Spotify playlists are not available to this server-side flow and will return a Spotify `403 Forbidden` error unless they are made public/accessibile by link.
+
 The dashboard shows each server, current song, voice status, queue, saved soundboard, and recent bot logs. It can pause, resume, skip, stop, disconnect from voice, start music from a URL/search/playlist, save soundboard buttons from YouTube or Spotify searches/URLs/playlists or uploaded local files, play saved sounds, send a message as the bot to the configured music channel, update the bot from Git, or remove the bot from a server.
 
 Uploaded soundboard files are stored in `soundboard_files/`, which is ignored by Git.

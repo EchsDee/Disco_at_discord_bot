@@ -20,6 +20,7 @@ def register_music_commands(app: dict) -> None:
     queued_tracks_message = app["queued_tracks_message"]
     player_loop = app["player_loop"]
     build_queue_embed = app["build_queue_embed"]
+    log_error = app["log_error"]
 
     @commands.guild_only()
     @commands.has_guild_permissions(manage_channels=True)
@@ -67,6 +68,7 @@ def register_music_commands(app: dict) -> None:
             try:
                 tracks = await extract_tracks(query, str(ctx.author.display_name))
             except Exception as exc:
+                log_error(f"Play command failed in {ctx.guild.name} ({ctx.guild.id})", exc)
                 raise commands.CommandError(f"Could not load that track: {exc}") from exc
             await queue_tracks(state, tracks)
 
@@ -159,4 +161,7 @@ def register_music_commands(app: dict) -> None:
         if isinstance(error, commands.MissingRequiredArgument):
             await send_clean(ctx, f"Missing argument. Try `{command_prefix}{ctx.command} <YouTube/Spotify URL or search>`.")
         else:
+            guild_name = ctx.guild.name if ctx.guild else "DM"
+            guild_id = ctx.guild.id if ctx.guild else "none"
+            log_error(f"Command error in {guild_name} ({guild_id})", error)
             await send_clean(ctx, str(error))
