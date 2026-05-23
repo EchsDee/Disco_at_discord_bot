@@ -17,6 +17,7 @@ const botAvatar = document.getElementById("botAvatar");
 const adminToast = document.getElementById("adminToast");
 const logBox = document.getElementById("logBox");
 const loginUsers = document.getElementById("loginUsers");
+const spotifyStatus = document.getElementById("spotifyStatus");
 const dashboardUser = document.getElementById("dashboardUser");
 const dashboardAvatar = document.getElementById("dashboardAvatar");
 const superuserControls = document.getElementById("superuserControls");
@@ -381,6 +382,15 @@ function render(data) {
   const isSuperuser = Boolean(data.user && data.user.superuser);
   navAdmin.hidden = !isSuperuser;
   superuserControls.style.display = isSuperuser ? "flex" : "none";
+  if (spotifyStatus) {
+    if (!data.spotify || !data.spotify.oauth_enabled) {
+      spotifyStatus.textContent = "Spotify playlist login is not configured.";
+    } else if (data.spotify.connected) {
+      spotifyStatus.textContent = `Spotify connected: ${data.spotify.user_name || "ready for owned/collaborative playlists"}.`;
+    } else {
+      spotifyStatus.textContent = "Spotify is not connected for playlist reads.";
+    }
+  }
   if (!isSuperuser && currentView() === "admin") {
     setView("dashboard");
   } else {
@@ -511,6 +521,10 @@ async function restartBot() {
   const response = await fetch("/api/restart", { method: "POST" });
   const data = await response.json();
   adminToast.textContent = data.message || data.error || "";
+}
+
+function connectSpotify() {
+  window.location.href = "/auth/spotify/start";
 }
 
 async function logoutDashboard() {

@@ -48,6 +48,7 @@ DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 DASHBOARD_SESSION_SECRET = os.getenv("DASHBOARD_SESSION_SECRET") or DISCORD_TOKEN or secrets.token_urlsafe(32)
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
+SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "").rstrip("/")
 DASHBOARD_SUPERUSER_IDS = {
     user_id.strip()
     for user_id in os.getenv("DASHBOARD_SUPERUSER_IDS", "").split(",")
@@ -115,6 +116,14 @@ def discord_oauth_enabled() -> bool:
 
 def dashboard_public_url() -> str:
     return DASHBOARD_PUBLIC_URL or dashboard_url()
+
+
+def spotify_oauth_enabled() -> bool:
+    return bool(SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and spotify_redirect_uri())
+
+
+def spotify_redirect_uri() -> str:
+    return SPOTIFY_REDIRECT_URI or f"{dashboard_public_url()}/auth/spotify/callback"
 
 
 def discord_avatar_url(user_data: dict) -> str:
@@ -210,7 +219,13 @@ def visible_dashboard_guilds(request: web.Request) -> list[discord.Guild]:
 
 @web.middleware
 async def dashboard_auth_middleware(request: web.Request, handler):
-    public_paths = {"/login", "/api/login", "/auth/discord/start", "/auth/discord/callback"}
+    public_paths = {
+        "/login",
+        "/api/login",
+        "/auth/discord/start",
+        "/auth/discord/callback",
+        "/auth/spotify/callback",
+    }
     if request.path in public_paths or request.path.startswith("/static/"):
         return await handler(request)
 
@@ -254,21 +269,37 @@ playlist_ytdl = yt_dlp.YoutubeDL(
 )
 spotify_access_token = ""
 spotify_token_expires_at = 0.0
+spotify_user_access_token = ""
+spotify_user_token_expires_at = 0.0
 
 
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
-        return {"music_channels": {}, "soundboards": {}, "dashboard_superuser_ids": []}
+        return {
+            "music_channels": {},
+            "soundboards": {},
+            "dashboard_superuser_ids": [],
+            "spotify_refresh_token": "",
+            "spotify_user_name": "",
+        }
 
     try:
         with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
             config = json.load(config_file)
     except (json.JSONDecodeError, OSError):
-        return {"music_channels": {}, "soundboards": {}, "dashboard_superuser_ids": []}
+        return {
+            "music_channels": {},
+            "soundboards": {},
+            "dashboard_superuser_ids": [],
+            "spotify_refresh_token": "",
+            "spotify_user_name": "",
+        }
 
     config.setdefault("music_channels", {})
     config.setdefault("soundboards", {})
     config.setdefault("dashboard_superuser_ids", [])
+    config.setdefault("spotify_refresh_token", "")
+    config.setdefault("spotify_user_name", "")
     return config
 
 
@@ -301,6 +332,16 @@ def set_dashboard_config_superuser(user_id: str, enabled: bool) -> None:
         configured.discard(user_id)
 
     config["dashboard_superuser_ids"] = sorted(configured)
+    save_config(config)
+
+
+def spotify_refresh_token() -> str:
+    return str(config.get("spotify_refresh_token", "")).strip()
+
+
+def set_spotify_login(refresh_token: str, user_name: str = "") -> None:
+    config["spotify_refresh_token"] = refresh_token
+    config["spotify_user_name"] = user_name
     save_config(config)
 
 
@@ -856,6 +897,79 @@ async def dashboard_discord_callback(request: web.Request) -> web.Response:
     return response
 
 
+async def dashboard_spotify_start(request: web.Request) -> web.Response:
+    if not dashboard_user_is_superuser(request):
+        return web.Response(text="Superuser access required.", status=403)
+    if not spotify_oauth_enabled():
+        return web.Response(
+            text="Spotify OAuth is not configured. Set SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, and SPOTIFY_REDIRECT_URI or DASHBOARD_PUBLIC_URL.",
+            status=400,
+        )
+
+    state = secrets.token_urlsafe(24)
+    params = urlencode(
+        {
+            "client_id": SPOTIFY_CLIENT_ID,
+            "response_type": "code",
+            "redirect_uri": spotify_redirect_uri(),
+            "scope": "playlist-read-private playlist-read-collaborative",
+            "state": state,
+            "show_dialog": "true",
+        }
+    )
+    response = web.HTTPFound(f"https://accounts.spotify.com/authorize?{params}")
+    response.set_cookie("spotify_oauth_state", sign_value(state), httponly=True, path="/", samesite="Lax", max_age=600)
+    raise response
+
+
+async def dashboard_spotify_callback(request: web.Request) -> web.Response:
+    if not spotify_oauth_enabled():
+        raise web.HTTPNotFound()
+
+    state = request.query.get("state", "")
+    code = request.query.get("code", "")
+    if not state or not code or verify_signed_value(request.cookies.get("spotify_oauth_state", "")) != state:
+        log_event("Spotify dashboard login failed state validation.")
+        raise web.HTTPUnauthorized(text="Invalid Spotify login state.")
+
+    credentials = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode("utf-8")
+    headers = {
+        "Authorization": "Basic " + base64.b64encode(credentials).decode("ascii"),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    async with ClientSession() as session:
+        token_response = await session.post(
+            "https://accounts.spotify.com/api/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": spotify_redirect_uri(),
+            },
+            headers=headers,
+        )
+        token_data = await token_response.json(content_type=None)
+
+    refresh_token = token_data.get("refresh_token")
+    if token_response.status >= 400 or not refresh_token:
+        error = token_data.get("error_description") or token_data.get("error") or "Spotify login failed."
+        log_event(f"Spotify dashboard login failed ({token_response.status}): {error}")
+        return web.Response(text=f"Spotify login failed: {error}", status=400)
+
+    set_spotify_login(refresh_token, "Connected Spotify account")
+    log_event("Spotify dashboard login succeeded; refresh token saved.")
+    response = web.Response(
+        text="""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Spotify Connected</title></head>
+<body><script>window.location.replace("/");</script>Spotify connected. Returning to dashboard...</body>
+</html>""",
+        content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+    response.del_cookie("spotify_oauth_state", path="/")
+    return response
+
+
 async def dashboard_logout(request: web.Request) -> web.Response:
     response = web.json_response({"ok": True, "message": "Logged out."})
     response.del_cookie("dashboard_session", path="/")
@@ -878,6 +992,12 @@ async def dashboard_status(request: web.Request) -> web.Response:
                 "name": user.get("name", ""),
                 "avatar_url": user.get("avatar_url", ""),
                 "superuser": bool(user.get("superuser")),
+            },
+            "spotify": {
+                "oauth_enabled": spotify_oauth_enabled(),
+                "connected": bool(spotify_refresh_token()),
+                "user_name": config.get("spotify_user_name", ""),
+                "redirect_uri": spotify_redirect_uri(),
             },
             "guilds": [guild_to_payload(guild) for guild in visible_dashboard_guilds(request)],
         }
@@ -1269,6 +1389,8 @@ async def start_dashboard() -> None:
     app.router.add_post("/api/login", dashboard_login)
     app.router.add_get("/auth/discord/start", dashboard_discord_start)
     app.router.add_get("/auth/discord/callback", dashboard_discord_callback)
+    app.router.add_get("/auth/spotify/start", dashboard_spotify_start)
+    app.router.add_get("/auth/spotify/callback", dashboard_spotify_callback)
     app.router.add_post("/api/logout", dashboard_logout)
     app.router.add_get("/api/status", dashboard_status)
     app.router.add_get("/api/logs", dashboard_logs)
@@ -1400,8 +1522,43 @@ async def spotify_token() -> str:
     return spotify_access_token
 
 
-async def spotify_api_get(path: str, params: Optional[dict[str, str | int]] = None) -> dict:
-    token = await spotify_token()
+async def spotify_user_token() -> Optional[str]:
+    global spotify_user_access_token, spotify_user_token_expires_at
+
+    refresh_token = spotify_refresh_token()
+    if not refresh_token:
+        return None
+
+    if spotify_user_access_token and time.time() < spotify_user_token_expires_at - 60:
+        return spotify_user_access_token
+
+    credentials = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode("utf-8")
+    headers = {
+        "Authorization": "Basic " + base64.b64encode(credentials).decode("ascii"),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    async with ClientSession() as session:
+        async with session.post(
+            "https://accounts.spotify.com/api/token",
+            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+            headers=headers,
+        ) as response:
+            data = await response.json(content_type=None)
+            if response.status >= 400:
+                error = data.get("error_description") or data.get("error") or "Spotify user authentication failed."
+                log_event(f"Spotify user token refresh failed ({response.status}): {error}")
+                return None
+
+    spotify_user_access_token = data["access_token"]
+    spotify_user_token_expires_at = time.time() + int(data.get("expires_in", 3600))
+    return spotify_user_access_token
+
+
+async def spotify_api_get(path: str, params: Optional[dict[str, str | int]] = None, user_token: bool = False) -> dict:
+    token = await spotify_user_token() if user_token else None
+    used_user_token = token is not None
+    if token is None:
+        token = await spotify_token()
     url = f"https://api.spotify.com/v1{path}"
     if params:
         url += "?" + urlencode(params)
@@ -1412,8 +1569,12 @@ async def spotify_api_get(path: str, params: Optional[dict[str, str | int]] = No
             if response.status >= 400:
                 error = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else None
                 if response.status == 403 and path.startswith("/playlists/"):
+                    if user_token and not used_user_token:
+                        raise commands.CommandError(
+                            "Spotify blocked playlist items for app-only access. Connect your Spotify account from the dashboard Admin tab, then try again."
+                        )
                     raise commands.CommandError(
-                        "Spotify returned 403 Forbidden for that playlist. Make sure the playlist is public and accessible by link; private playlists need a user-login Spotify flow that this bot does not use yet."
+                        "Spotify returned 403 Forbidden for that playlist. The connected Spotify user must own or collaborate on that playlist."
                     )
                 raise commands.CommandError(f"Spotify request failed ({response.status}): {error or 'Unknown error'}")
             return data
@@ -1430,13 +1591,17 @@ def spotify_track_search(track: dict) -> Optional[str]:
     return f"{artists} - {name} official audio" if artists else f"{name} official audio"
 
 
-async def spotify_paged_tracks(path: str, item_getter, limit: int, page_size: int = 100) -> list[str]:
+async def spotify_paged_tracks(path: str, item_getter, limit: int, page_size: int = 100, user_token: bool = False) -> list[str]:
     searches = []
     offset = 0
 
     while len(searches) < limit:
         page_limit = min(page_size, limit - len(searches))
-        data = await spotify_api_get(path, {"limit": page_limit, "offset": offset, "market": SPOTIFY_MARKET})
+        data = await spotify_api_get(
+            path,
+            {"limit": page_limit, "offset": offset, "market": SPOTIFY_MARKET},
+            user_token=user_token,
+        )
         items = data.get("items") or []
         if not items:
             break
@@ -1479,6 +1644,7 @@ async def spotify_search_queries(query: str) -> Optional[list[str]]:
             f"/playlists/{resource_id}/tracks",
             lambda item: item.get("track") or {},
             MAX_PLAYLIST_TRACKS,
+            user_token=True,
         )
 
     return []

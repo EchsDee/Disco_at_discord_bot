@@ -99,9 +99,10 @@ Dashboard settings:
 - `YTDL_FORMAT=bestaudio/best`: yt-dlp format selector
 - `YTDL_JS_RUNTIME=`: optional JavaScript runtime for yt-dlp challenge solving, for example `deno`
 - `SPOTIFY_CLIENT_ID=` and `SPOTIFY_CLIENT_SECRET=`: optional Spotify app credentials for Spotify track, album, and playlist links
+- `SPOTIFY_REDIRECT_URI=`: optional Spotify OAuth callback URL; defaults to `DASHBOARD_PUBLIC_URL/auth/spotify/callback`
 - `SPOTIFY_MARKET=US`: Spotify market used when resolving available tracks
 
-Spotify playback uses Spotify metadata and YouTube audio search. Public Spotify tracks, albums, and playlists can be resolved with the app credentials above. Private Spotify playlists are not available to this server-side flow and will return a Spotify `403 Forbidden` error unless they are made public/accessibile by link.
+Spotify playback uses Spotify metadata and YouTube audio search. Tracks and albums can be resolved with the app credentials above. Spotify playlist items require a connected Spotify user that owns or collaborates on the playlist; use the dashboard Admin tab's **Connect Spotify** button after adding the callback URL to your Spotify app.
 
 The dashboard shows each server, current song, voice status, queue, saved soundboard, and recent bot logs. It can pause, resume, skip, stop, disconnect from voice, start music from a URL/search/playlist, save soundboard buttons from YouTube or Spotify searches/URLs/playlists or uploaded local files, play saved sounds, send a message as the bot to the configured music channel, update the bot from Git, or remove the bot from a server.
 
