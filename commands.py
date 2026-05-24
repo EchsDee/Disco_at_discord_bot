@@ -18,6 +18,7 @@ def register_music_commands(app: dict) -> None:
     extract_tracks = app["extract_tracks"]
     queue_tracks = app["queue_tracks"]
     queued_tracks_message = app["queued_tracks_message"]
+    build_queued_tracks_embed = app["build_queued_tracks_embed"]
     player_loop = app["player_loop"]
     build_queue_embed = app["build_queue_embed"]
     log_error = app["log_error"]
@@ -72,7 +73,12 @@ def register_music_commands(app: dict) -> None:
                 raise commands.CommandError(f"Could not load that track: {exc}") from exc
             await queue_tracks(state, tracks)
 
-        await send_clean(ctx, queued_tracks_message(tracks), view=music_control_view())
+        await send_clean(
+            ctx,
+            queued_tracks_message(tracks),
+            embed=build_queued_tracks_embed(tracks),
+            view=music_control_view(),
+        )
 
         if state.player_task is None or state.player_task.done():
             state.player_task = asyncio.create_task(player_loop(ctx))

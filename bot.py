@@ -399,6 +399,10 @@ class Track:
     thumbnail_url: Optional[str]
     is_local_file: bool = False
     lazy_query: str = ""
+    source_title: str = ""
+    source_url: str = ""
+    source_thumbnail_url: str = ""
+    source_type: str = ""
 
 
 class GuildMusicState:
@@ -1250,6 +1254,7 @@ async def dashboard_control(request: web.Request) -> web.Response:
             guild.id,
             music_channel or voice_channel,
             queued_tracks_message(tracks),
+            embed=build_queued_tracks_embed(tracks),
             view=MusicControlView(),
         )
 
@@ -1459,6 +1464,7 @@ DASHBOARD_LOGIN_HTML = load_dashboard_login_html()
 
 
 def looks_like_playlist_query(query: str) -> bool:
+    query = extract_media_url_from_html(query)
     parsed = urlparse(query)
     if not parsed.scheme or not parsed.netloc:
         return False
@@ -1467,8 +1473,15 @@ def looks_like_playlist_query(query: str) -> bool:
     return "list" in query_values or "/playlist" in parsed.path
 
 
+def extract_media_url_from_html(query: str) -> str:
+    match = re.search(r"\bsrc=[\"']([^\"']+)[\"']", query, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return query
+
+
 def spotify_resource_from_query(query: str) -> Optional[tuple[str, str]]:
-    query = query.strip()
+    query = extract_media_url_from_html(query.strip())
     if query.startswith("spotify:"):
         parts = query.split(":")
         if len(parts) >= 3 and parts[1] in {"track", "album", "playlist"} and parts[2]:
@@ -1592,7 +1605,16 @@ def spotify_track_search(track: dict) -> Optional[str]:
     return f"{artists} - {name} official audio" if artists else f"{name} official audio"
 
 
-def lazy_track_from_query(search_query: str, requester: str, title: str = "", webpage_url: str = "") -> Track:
+def lazy_track_from_query(
+    search_query: str,
+    requester: str,
+    title: str = "",
+    webpage_url: str = "",
+    source_title: str = "",
+    source_url: str = "",
+    source_thumbnail_url: str = "",
+    source_type: str = "",
+) -> Track:
     title = title or search_query.removesuffix(" official audio")
     return Track(
         title=title,
@@ -1602,6 +1624,10 @@ def lazy_track_from_query(search_query: str, requester: str, title: str = "", we
         http_headers={},
         thumbnail_url=None,
         lazy_query=search_query,
+        source_title=source_title,
+        source_url=source_url,
+        source_thumbnail_url=source_thumbnail_url,
+        source_type=source_type,
     )
 
 
@@ -1632,7 +1658,18 @@ async def resolve_lazy_track(track: Track) -> Track:
     return track
 
 
-async def spotify_paged_tracks(path: str, item_getter, limit: int, requester: str, page_size: int = 100, user_token: bool = False) -> list[Track]:
+async def spotify_paged_tracks(
+    path: str,
+    item_getter,
+    limit: int,
+    requester: str,
+    page_size: int = 100,
+    user_token: bool = False,
+    source_title: str = "",
+    source_url: str = "",
+    source_thumbnail_url: str = "",
+    source_type: str = "",
+) -> list[Track]:
     tracks = []
     offset = 0
 
@@ -1650,7 +1687,16 @@ async def spotify_paged_tracks(path: str, item_getter, limit: int, requester: st
         for item in items:
             search = spotify_track_search(item_getter(item))
             if search:
-                tracks.append(lazy_track_from_query(search, requester))
+                tracks.append(
+                    lazy_track_from_query(
+                        search,
+                        requester,
+                        source_title=source_title,
+                        source_url=source_url,
+                        source_thumbnail_url=source_thumbnail_url,
+                        source_type=source_type,
+                    )
+                )
                 if len(tracks) >= limit:
                     break
 
@@ -1659,6 +1705,11 @@ async def spotify_paged_tracks(path: str, item_getter, limit: int, requester: st
         offset += len(items)
 
     return tracks
+
+
+def spotify_image_url(data: dict) -> str:
+    images = data.get("images") or []
+    return images[0].get("url", "") if images else ""
 
 
 async def spotify_tracks_from_query(query: str, requester: str) -> Optional[list[Track]]:
@@ -1673,21 +1724,45 @@ async def spotify_tracks_from_query(query: str, requester: str) -> Optional[list
         return [lazy_track_from_query(search, requester)] if search else []
 
     if resource_type == "album":
+        album = await spotify_api_get(
+            f"/albums/{resource_id}",
+            {"market": SPOTIFY_MARKET},
+        )
         return await spotify_paged_tracks(
             f"/albums/{resource_id}/tracks",
             lambda item: {**item, "type": "track"},
             MAX_PLAYLIST_TRACKS,
             requester,
             page_size=50,
+            source_title=album.get("name", "Spotify album"),
+            source_url=(album.get("external_urls") or {}).get("spotify", ""),
+            source_thumbnail_url=spotify_image_url(album),
+            source_type="Spotify album",
         )
 
     if resource_type == "playlist":
+        playlist = {}
+        try:
+            playlist = await spotify_api_get(
+                f"/playlists/{resource_id}",
+                {
+                    "market": SPOTIFY_MARKET,
+                    "fields": "name,external_urls,images,owner(display_name),tracks(total)",
+                },
+                user_token=True,
+            )
+        except commands.CommandError as exc:
+            log_event(f"Could not load Spotify playlist card metadata: {exc}")
         return await spotify_paged_tracks(
             f"/playlists/{resource_id}/items",
             lambda item: item.get("item") or item.get("track") or {},
             MAX_PLAYLIST_TRACKS,
             requester,
             user_token=True,
+            source_title=playlist.get("name", "Spotify playlist"),
+            source_url=(playlist.get("external_urls") or {}).get("spotify", f"https://open.spotify.com/playlist/{resource_id}"),
+            source_thumbnail_url=spotify_image_url(playlist),
+            source_type="Spotify playlist",
         )
 
     return []
@@ -1711,6 +1786,7 @@ def track_from_data(data: dict, query: str, requester: str) -> Track:
 
 async def extract_tracks(query: str, requester: str) -> list[Track]:
     loop = asyncio.get_running_loop()
+    query = extract_media_url_from_html(query.strip())
     spotify_tracks = await spotify_tracks_from_query(query, requester)
     if spotify_tracks is not None:
         if not spotify_tracks:
@@ -1729,6 +1805,10 @@ async def extract_tracks(query: str, requester: str) -> list[Track]:
     if "entries" in data:
         entries = [entry for entry in data["entries"] if entry]
         if looks_like_playlist_query(query):
+            thumbnails = data.get("thumbnails") or []
+            source_thumbnail_url = thumbnails[-1].get("url", "") if thumbnails else data.get("thumbnail", "")
+            source_title = data.get("title") or "YouTube playlist"
+            source_url = data.get("webpage_url") or query
             tracks = []
             for index, entry in enumerate(entries[:MAX_PLAYLIST_TRACKS], start=1):
                 entry_url = entry.get("webpage_url") or entry.get("url")
@@ -1738,7 +1818,18 @@ async def extract_tracks(query: str, requester: str) -> list[Track]:
                     entry_url = f"https://www.youtube.com/watch?v={entry_url}"
 
                 title = entry.get("title") or f"Playlist item {index}"
-                tracks.append(lazy_track_from_query(entry_url, requester, title=title, webpage_url=entry_url))
+                tracks.append(
+                    lazy_track_from_query(
+                        entry_url,
+                        requester,
+                        title=title,
+                        webpage_url=entry_url,
+                        source_title=source_title,
+                        source_url=source_url,
+                        source_thumbnail_url=source_thumbnail_url,
+                        source_type="YouTube playlist",
+                    )
+                )
 
             if not tracks:
                 raise commands.CommandError("No playable tracks found in that playlist.")
@@ -1769,6 +1860,30 @@ def queued_tracks_message(tracks: list[Track]) -> str:
         return f"Queued: **{tracks[0].title}**"
 
     return f"Queued **{len(tracks)}** playlist tracks. First up: **{tracks[0].title}**"
+
+
+def build_queued_tracks_embed(tracks: list[Track]) -> Optional[discord.Embed]:
+    if len(tracks) <= 1:
+        return None
+
+    first_track = tracks[0]
+    if not first_track.source_title:
+        return None
+
+    source_label = first_track.source_type or "Playlist"
+    title = f"{source_label} queued"
+    description = (
+        f"**[{first_track.source_title}]({first_track.source_url})**"
+        if first_track.source_url
+        else f"**{first_track.source_title}**"
+    )
+    embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
+    embed.add_field(name="Tracks", value=str(len(tracks)), inline=True)
+    embed.add_field(name="First up", value=first_track.title[:1024], inline=True)
+    embed.set_footer(text=f"Requested by {first_track.requester}")
+    if first_track.source_thumbnail_url:
+        embed.set_thumbnail(url=first_track.source_thumbnail_url)
+    return embed
 
 
 async def ensure_voice(ctx: commands.Context) -> discord.VoiceClient:
