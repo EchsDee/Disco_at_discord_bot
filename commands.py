@@ -49,7 +49,7 @@ def register_music_commands(app: dict) -> None:
             description="Use this channel for music commands and queue controls.",
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="Commands", value="`/play`, `/queue`, `/pause`, `/resume`, `/skip`, `/stop`, `/leave`")
+        embed.add_field(name="Commands", value="`/play`, `/queue`, `/pause`, `/resume`, `/skip`, `/stop`, `/leave`, `/clear`")
         await send_clean_to_channel(ctx.guild.id, channel, embed=embed, view=music_control_view())
         await ctx.send(f"Music bot channel set to {channel.mention}.", ephemeral=bool(ctx.interaction))
 
@@ -124,6 +124,41 @@ def register_music_commands(app: dict) -> None:
     async def queue(ctx: commands.Context) -> None:
         await acknowledge_music_routing(ctx)
         await send_clean(ctx, embed=build_queue_embed(ctx.guild.id), view=music_control_view())
+
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_messages=True)
+    @bot.hybrid_command(name="clear", description="Clear recent messages from the bot's music channel.")
+    async def clear(ctx: commands.Context, limit: int = 100) -> None:
+        if ctx.interaction:
+            await ctx.defer(ephemeral=True)
+
+        channel_id = get_music_channel_id(ctx.guild.id)
+        channel = ctx.guild.get_channel(channel_id) if channel_id else None
+        if channel is None:
+            raise commands.CommandError("Set up a music channel first with /setup_music_channel.")
+
+        if not isinstance(channel, discord.TextChannel):
+            raise commands.CommandError("The configured music channel is not a text channel.")
+
+        limit = max(1, min(limit, 500))
+
+        def should_delete(message: discord.Message) -> bool:
+            return True
+
+        deleted = await channel.purge(limit=limit, check=should_delete, reason=f"Music channel cleared by {ctx.author}")
+        state = get_music_state(ctx.guild.id)
+        state.last_message_id = None
+        state.last_channel_id = None
+
+        message = f"Cleared {len(deleted)} message(s) from {channel.mention}."
+        if ctx.interaction:
+            await ctx.send(message, ephemeral=True)
+        else:
+            try:
+                await ctx.message.delete()
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                pass
+            await ctx.send(message, delete_after=5)
 
     @commands.guild_only()
     @bot.hybrid_command(name="stop", description="Stop playback and clear the queue.")
