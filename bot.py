@@ -398,6 +398,7 @@ class Track:
     http_headers: dict[str, str]
     thumbnail_url: Optional[str]
     is_local_file: bool = False
+    lazy_query: str = ""
 
 
 class GuildMusicState:
@@ -1591,12 +1592,52 @@ def spotify_track_search(track: dict) -> Optional[str]:
     return f"{artists} - {name} official audio" if artists else f"{name} official audio"
 
 
-async def spotify_paged_tracks(path: str, item_getter, limit: int, page_size: int = 100, user_token: bool = False) -> list[str]:
-    searches = []
+def lazy_track_from_query(search_query: str, requester: str, title: str = "", webpage_url: str = "") -> Track:
+    title = title or search_query.removesuffix(" official audio")
+    return Track(
+        title=title,
+        webpage_url=webpage_url or f"https://www.youtube.com/results?{urlencode({'search_query': search_query})}",
+        stream_url="",
+        requester=requester,
+        http_headers={},
+        thumbnail_url=None,
+        lazy_query=search_query,
+    )
+
+
+async def resolve_lazy_track(track: Track) -> Track:
+    if not track.lazy_query or track.stream_url:
+        return track
+
+    loop = asyncio.get_running_loop()
+    log_event(f"Resolving queued lazy track: {track.lazy_query}")
+    lookup_query = track.lazy_query if urlparse(track.lazy_query).scheme else f"ytsearch1:{track.lazy_query}"
+    data = await asyncio.wait_for(
+        loop.run_in_executor(None, lambda: ytdl.extract_info(lookup_query, download=False)),
+        timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
+    )
+    if "entries" in data:
+        entries = [entry for entry in data.get("entries", []) if entry]
+        if not entries:
+            raise commands.CommandError(f"No playable YouTube match found for {track.title}.")
+        data = entries[0]
+
+    resolved = track_from_data(data, track.lazy_query, track.requester)
+    track.title = resolved.title
+    track.webpage_url = resolved.webpage_url
+    track.stream_url = resolved.stream_url
+    track.http_headers = resolved.http_headers
+    track.thumbnail_url = resolved.thumbnail_url
+    track.lazy_query = ""
+    return track
+
+
+async def spotify_paged_tracks(path: str, item_getter, limit: int, requester: str, page_size: int = 100, user_token: bool = False) -> list[Track]:
+    tracks = []
     offset = 0
 
-    while len(searches) < limit:
-        page_limit = min(page_size, limit - len(searches))
+    while len(tracks) < limit:
+        page_limit = min(page_size, limit - len(tracks))
         data = await spotify_api_get(
             path,
             {"limit": page_limit, "offset": offset, "market": SPOTIFY_MARKET},
@@ -1609,18 +1650,18 @@ async def spotify_paged_tracks(path: str, item_getter, limit: int, page_size: in
         for item in items:
             search = spotify_track_search(item_getter(item))
             if search:
-                searches.append(search)
-                if len(searches) >= limit:
+                tracks.append(lazy_track_from_query(search, requester))
+                if len(tracks) >= limit:
                     break
 
         if not data.get("next"):
             break
         offset += len(items)
 
-    return searches
+    return tracks
 
 
-async def spotify_search_queries(query: str) -> Optional[list[str]]:
+async def spotify_tracks_from_query(query: str, requester: str) -> Optional[list[Track]]:
     resource = spotify_resource_from_query(query)
     if not resource:
         return None
@@ -1629,13 +1670,14 @@ async def spotify_search_queries(query: str) -> Optional[list[str]]:
     if resource_type == "track":
         data = await spotify_api_get(f"/tracks/{resource_id}", {"market": SPOTIFY_MARKET})
         search = spotify_track_search(data)
-        return [search] if search else []
+        return [lazy_track_from_query(search, requester)] if search else []
 
     if resource_type == "album":
         return await spotify_paged_tracks(
             f"/albums/{resource_id}/tracks",
             lambda item: {**item, "type": "track"},
             MAX_PLAYLIST_TRACKS,
+            requester,
             page_size=50,
         )
 
@@ -1644,6 +1686,7 @@ async def spotify_search_queries(query: str) -> Optional[list[str]]:
             f"/playlists/{resource_id}/items",
             lambda item: item.get("item") or item.get("track") or {},
             MAX_PLAYLIST_TRACKS,
+            requester,
             user_token=True,
         )
 
@@ -1668,27 +1711,13 @@ def track_from_data(data: dict, query: str, requester: str) -> Track:
 
 async def extract_tracks(query: str, requester: str) -> list[Track]:
     loop = asyncio.get_running_loop()
-    spotify_queries = await spotify_search_queries(query)
-    if spotify_queries is not None:
-        if not spotify_queries:
+    spotify_tracks = await spotify_tracks_from_query(query, requester)
+    if spotify_tracks is not None:
+        if not spotify_tracks:
             raise commands.CommandError("No playable Spotify tracks found.")
 
-        tracks = []
-        log_event(f"Resolving Spotify media for {requester}: {len(spotify_queries)} track(s)")
-        for index, search_query in enumerate(spotify_queries[:MAX_PLAYLIST_TRACKS], start=1):
-            log_event(f"Searching YouTube for Spotify item {index}/{len(spotify_queries)}: {search_query}")
-            data = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda item_query=search_query: ytdl.extract_info(f"ytsearch1:{item_query}", download=False)),
-                timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
-            )
-            entries = [entry for entry in data.get("entries", []) if entry] if "entries" in data else []
-            if entries:
-                tracks.append(track_from_data(entries[0], search_query, requester))
-
-        if not tracks:
-            raise commands.CommandError("No playable YouTube matches found for that Spotify link.")
-        log_event(f"Resolved Spotify link to {len(tracks)} playable track(s) for {requester}")
-        return tracks
+        log_event(f"Queued Spotify media lazily for {requester}: {len(spotify_tracks)} track(s)")
+        return spotify_tracks
 
     extractor = playlist_ytdl if looks_like_playlist_query(query) else ytdl
     log_event(f"Extracting media for {requester}: {query}")
@@ -1705,17 +1734,15 @@ async def extract_tracks(query: str, requester: str) -> list[Track]:
                 entry_url = entry.get("webpage_url") or entry.get("url")
                 if not entry_url:
                     continue
+                if not urlparse(entry_url).scheme:
+                    entry_url = f"https://www.youtube.com/watch?v={entry_url}"
 
-                log_event(f"Extracting playlist item {index}/{len(entries)} for {requester}: {entry_url}")
-                item_data = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda item_url=entry_url: ytdl.extract_info(item_url, download=False)),
-                    timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
-                )
-                tracks.append(track_from_data(item_data, entry_url, requester))
+                title = entry.get("title") or f"Playlist item {index}"
+                tracks.append(lazy_track_from_query(entry_url, requester, title=title, webpage_url=entry_url))
 
             if not tracks:
                 raise commands.CommandError("No playable tracks found in that playlist.")
-            log_event(f"Extracted playlist with {len(tracks)} tracks for {requester}")
+            log_event(f"Queued YouTube playlist lazily with {len(tracks)} tracks for {requester}")
             return tracks
 
         if not entries:
@@ -1764,11 +1791,28 @@ async def player_loop(ctx: commands.Context) -> None:
 
     while True:
         state.current = await state.queue.get()
+
+        voice_client = ctx.guild.voice_client
+        if not voice_client or not voice_client.is_connected():
+            state.current = None
+            state.queue.task_done()
+            continue
+
+        try:
+            state.current = await resolve_lazy_track(state.current)
+        except Exception as exc:
+            log_error("Could not resolve queued track", exc)
+            await send_clean(ctx, f"Could not resolve queued track: `{exc}`")
+            state.current = None
+            state.queue.task_done()
+            continue
+
         log_event(f"Starting playback: {state.current.title}")
 
         voice_client = ctx.guild.voice_client
         if not voice_client or not voice_client.is_connected():
             state.current = None
+            state.queue.task_done()
             continue
 
         try:
