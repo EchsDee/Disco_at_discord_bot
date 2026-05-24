@@ -1641,8 +1641,8 @@ async def spotify_search_queries(query: str) -> Optional[list[str]]:
 
     if resource_type == "playlist":
         return await spotify_paged_tracks(
-            f"/playlists/{resource_id}/tracks",
-            lambda item: item.get("track") or {},
+            f"/playlists/{resource_id}/items",
+            lambda item: item.get("item") or item.get("track") or {},
             MAX_PLAYLIST_TRACKS,
             user_token=True,
         )
