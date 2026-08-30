@@ -504,8 +504,8 @@ async function setLoginUserSuperuser(userId, superuser) {
 }
 
 async function updateBot() {
-  if (!confirm("Update the bot from Git and restart if files changed?")) return;
-  adminToast.textContent = "Updating from Git...";
+  if (!confirm("Update the bot from Git, update Python packages, and restart if anything changed?")) return;
+  adminToast.textContent = "Updating from Git and Python packages...";
   const response = await fetch("/api/update", { method: "POST" });
   const data = await response.json();
   adminToast.textContent = data.message || data.error || "";

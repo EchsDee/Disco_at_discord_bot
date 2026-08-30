@@ -98,6 +98,8 @@ Dashboard settings:
 - `YTDL_COOKIE_FILE=`: optional path to a Netscape-format YouTube cookies file for hosted servers
 - `YTDL_FORMAT=bestaudio/best`: yt-dlp format selector
 - `YTDL_JS_RUNTIME=`: optional JavaScript runtime for yt-dlp challenge solving, for example `deno`
+- `YTDL_RETRIES=3`: retry count for transient yt-dlp extraction failures
+- `YTDL_YOUTUBE_PLAYER_CLIENTS=default,web_embedded`: YouTube player clients used by yt-dlp
 - `SPOTIFY_CLIENT_ID=` and `SPOTIFY_CLIENT_SECRET=`: optional Spotify app credentials for Spotify track, album, and playlist links
 - `SPOTIFY_REDIRECT_URI=`: optional Spotify OAuth callback URL; defaults to `DASHBOARD_PUBLIC_URL/auth/spotify/callback`
 - `SPOTIFY_MARKET=US`: Spotify market used when resolving available tracks
@@ -122,5 +124,5 @@ Uploaded soundboard files are stored in `soundboard_files/`, which is ignored by
 This bot streams audio with `yt-dlp` and FFmpeg. YouTube may change behavior over time, so update dependencies if playback stops working:
 
 ```powershell
-pip install -U yt-dlp discord.py PyNaCl
+pip install -U "yt-dlp[default]" discord.py PyNaCl
 ```

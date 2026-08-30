@@ -8,6 +8,7 @@ import shlex
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -60,6 +61,8 @@ YTDL_EXTRACT_TIMEOUT_SECONDS = int(os.getenv("YTDL_EXTRACT_TIMEOUT_SECONDS", "90
 YTDL_COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE")
 YTDL_FORMAT = os.getenv("YTDL_FORMAT", "bestaudio/best")
 YTDL_JS_RUNTIME = os.getenv("YTDL_JS_RUNTIME")
+YTDL_RETRIES = int(os.getenv("YTDL_RETRIES", "3"))
+YTDL_YOUTUBE_PLAYER_CLIENTS = os.getenv("YTDL_YOUTUBE_PLAYER_CLIENTS", "default,web_embedded")
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 SPOTIFY_MARKET = os.getenv("SPOTIFY_MARKET", "US")
@@ -248,11 +251,24 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "extract_flat": False,
     "source_address": "0.0.0.0",
+    "retries": YTDL_RETRIES,
+    "fragment_retries": YTDL_RETRIES,
+    "extractor_retries": YTDL_RETRIES,
 }
 if YTDL_COOKIE_FILE:
     YTDL_OPTIONS["cookiefile"] = YTDL_COOKIE_FILE
 if YTDL_JS_RUNTIME:
     YTDL_OPTIONS["js_runtimes"] = {runtime.strip(): {} for runtime in YTDL_JS_RUNTIME.split(",") if runtime.strip()}
+if YTDL_YOUTUBE_PLAYER_CLIENTS:
+    YTDL_OPTIONS["extractor_args"] = {
+        "youtube": {
+            "player_client": [
+                client.strip()
+                for client in YTDL_YOUTUBE_PLAYER_CLIENTS.split(",")
+                if client.strip()
+            ]
+        }
+    }
 
 FFMPEG_OPTIONS = {
     "options": "-vn",
@@ -1074,11 +1090,13 @@ async def dashboard_update_bot(request: web.Request) -> web.Response:
     if not dashboard_user_is_superuser(request):
         return web.json_response({"ok": False, "error": "Superuser access required."}, status=403)
 
+    project_dir = Path(__file__).resolve().parent
+
     try:
         result = await asyncio.to_thread(
             subprocess.run,
             ["git", "pull", "--ff-only"],
-            cwd=Path(__file__).resolve().parent,
+            cwd=project_dir,
             capture_output=True,
             text=True,
             timeout=90,
@@ -1099,16 +1117,54 @@ async def dashboard_update_bot(request: web.Request) -> web.Response:
 
     log_event(f"Git update completed: {output}")
     updated = "Already up to date." not in output
-    if updated:
-        log_event("Update changed files; restarting bot process.")
+
+    requirements_path = project_dir / "requirements.txt"
+    dependency_output = "No requirements.txt found; skipped Python package update."
+    dependencies_changed = False
+    if requirements_path.exists():
+        log_event("Updating Python packages from requirements.txt.")
+        try:
+            dependency_result = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, "-m", "pip", "install", "-U", "-r", str(requirements_path)],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            log_event("Python package update timed out.")
+            return web.json_response({"ok": False, "error": "Python package update timed out."}, status=504)
+        except OSError as exc:
+            log_event(f"Python package update failed: {exc}")
+            return web.json_response({"ok": False, "error": f"Could not run pip: {exc}"}, status=500)
+
+        dependency_output = "\n".join(
+            part.strip()
+            for part in (dependency_result.stdout, dependency_result.stderr)
+            if part.strip()
+        )
+        dependency_output = dependency_output or "No output."
+
+        if dependency_result.returncode != 0:
+            log_event(f"Python package update failed with exit code {dependency_result.returncode}: {dependency_output}")
+            return web.json_response({"ok": False, "error": dependency_output}, status=500)
+
+        dependencies_changed = "Successfully installed" in dependency_output
+        log_event(f"Python package update completed: {dependency_output}")
+
+    full_output = f"Git:\n{output}\n\nPython packages:\n{dependency_output}"
+    restarting = updated or dependencies_changed
+    if restarting:
+        log_event("Update changed code or Python packages; restarting bot process.")
         bot.loop.call_later(2, lambda: os._exit(0))
 
     return web.json_response(
         {
             "ok": True,
-            "message": "Updated from Git. Restarting..." if updated else "Already up to date.",
-            "output": output,
-            "restarting": updated,
+            "message": "Updated from Git/packages. Restarting..." if restarting else "Already up to date; packages checked.",
+            "output": full_output,
+            "restarting": restarting,
         }
     )
 
@@ -1605,6 +1661,32 @@ def spotify_track_search(track: dict) -> Optional[str]:
     return f"{artists} - {name} official audio" if artists else f"{name} official audio"
 
 
+def should_retry_ytdl_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "the page needs to be reloaded" in message
+
+
+async def extract_ytdl_info_with_retry(extractor: yt_dlp.YoutubeDL, query: str) -> dict:
+    loop = asyncio.get_running_loop()
+    attempts = max(1, YTDL_RETRIES)
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: extractor.extract_info(query, download=False)),
+                timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts or not should_retry_ytdl_error(exc):
+                raise
+            log_event(f"yt-dlp asked for a page reload; retrying extraction {attempt + 1}/{attempts}: {query}")
+            await asyncio.sleep(1)
+
+    raise last_error or commands.CommandError("Could not extract media.")
+
+
 def lazy_track_from_query(
     search_query: str,
     requester: str,
@@ -1635,13 +1717,9 @@ async def resolve_lazy_track(track: Track) -> Track:
     if not track.lazy_query or track.stream_url:
         return track
 
-    loop = asyncio.get_running_loop()
     log_event(f"Resolving queued lazy track: {track.lazy_query}")
     lookup_query = track.lazy_query if urlparse(track.lazy_query).scheme else f"ytsearch1:{track.lazy_query}"
-    data = await asyncio.wait_for(
-        loop.run_in_executor(None, lambda: ytdl.extract_info(lookup_query, download=False)),
-        timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
-    )
+    data = await extract_ytdl_info_with_retry(ytdl, lookup_query)
     if "entries" in data:
         entries = [entry for entry in data.get("entries", []) if entry]
         if not entries:
@@ -1785,7 +1863,6 @@ def track_from_data(data: dict, query: str, requester: str) -> Track:
 
 
 async def extract_tracks(query: str, requester: str) -> list[Track]:
-    loop = asyncio.get_running_loop()
     query = extract_media_url_from_html(query.strip())
     spotify_tracks = await spotify_tracks_from_query(query, requester)
     if spotify_tracks is not None:
@@ -1797,10 +1874,7 @@ async def extract_tracks(query: str, requester: str) -> list[Track]:
 
     extractor = playlist_ytdl if looks_like_playlist_query(query) else ytdl
     log_event(f"Extracting media for {requester}: {query}")
-    data = await asyncio.wait_for(
-        loop.run_in_executor(None, lambda: extractor.extract_info(query, download=False)),
-        timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
-    )
+    data = await extract_ytdl_info_with_retry(extractor, query)
 
     if "entries" in data:
         entries = [entry for entry in data["entries"] if entry]

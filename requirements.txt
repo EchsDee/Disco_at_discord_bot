@@ -1,6 +1,6 @@
 discord.py[voice]
 aiohttp
 python-dotenv
-yt-dlp
+yt-dlp[default]
 pystray
 Pillow
