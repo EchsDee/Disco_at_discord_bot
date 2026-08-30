@@ -96,7 +96,7 @@ Dashboard settings:
 - `MAX_PLAYLIST_TRACKS=50`: maximum songs to add from one playlist link
 - `YTDL_EXTRACT_TIMEOUT_SECONDS=90`: maximum time to wait for yt-dlp extraction
 - `YTDL_COOKIE_FILE=`: optional path to a Netscape-format YouTube cookies file for hosted servers
-- `YTDL_FORMAT=bestaudio/best`: yt-dlp format selector
+- `YTDL_FORMAT=bestaudio[acodec=opus]/bestaudio/best`: yt-dlp format selector; Opus is preferred to reduce CPU load while streaming to Discord
 - `YTDL_JS_RUNTIME=`: optional JavaScript runtime for yt-dlp challenge solving, for example `deno`
 - `YTDL_RETRIES=3`: retry count for transient yt-dlp extraction failures
 - `YTDL_YOUTUBE_PLAYER_CLIENTS=default,web_embedded`: YouTube player clients used by yt-dlp

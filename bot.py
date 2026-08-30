@@ -59,7 +59,7 @@ ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "1") != "0"
 MAX_PLAYLIST_TRACKS = int(os.getenv("MAX_PLAYLIST_TRACKS", "50"))
 YTDL_EXTRACT_TIMEOUT_SECONDS = int(os.getenv("YTDL_EXTRACT_TIMEOUT_SECONDS", "90"))
 YTDL_COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE")
-YTDL_FORMAT = os.getenv("YTDL_FORMAT", "bestaudio/best")
+YTDL_FORMAT = os.getenv("YTDL_FORMAT", "bestaudio[acodec=opus]/bestaudio/best")
 YTDL_JS_RUNTIME = os.getenv("YTDL_JS_RUNTIME")
 YTDL_RETRIES = int(os.getenv("YTDL_RETRIES", "3"))
 YTDL_YOUTUBE_PLAYER_CLIENTS = os.getenv("YTDL_YOUTUBE_PLAYER_CLIENTS", "default,web_embedded")
@@ -403,6 +403,26 @@ def build_ffmpeg_before_options(headers: dict[str, str]) -> str:
         args.extend(["-headers", "\r\n".join(header_lines) + "\r\n"])
 
     return " ".join(shlex.quote(arg) for arg in args)
+
+
+async def create_ffmpeg_audio_source(track: "Track") -> discord.AudioSource:
+    before_options = None if track.is_local_file else build_ffmpeg_before_options(track.http_headers)
+    try:
+        return await discord.FFmpegOpusAudio.from_probe(
+            track.stream_url,
+            method="fallback",
+            executable=FFMPEG_EXECUTABLE,
+            before_options=before_options,
+            **FFMPEG_OPTIONS,
+        )
+    except Exception as exc:
+        log_event(f"Opus audio source failed; falling back to PCM: {exc}")
+        return discord.FFmpegPCMAudio(
+            track.stream_url,
+            executable=FFMPEG_EXECUTABLE,
+            before_options=before_options,
+            **FFMPEG_OPTIONS,
+        )
 
 
 @dataclass
@@ -2005,13 +2025,7 @@ async def player_loop(ctx: commands.Context) -> None:
             continue
 
         try:
-            before_options = None if state.current.is_local_file else build_ffmpeg_before_options(state.current.http_headers)
-            source = discord.FFmpegPCMAudio(
-                state.current.stream_url,
-                executable=FFMPEG_EXECUTABLE,
-                before_options=before_options,
-                **FFMPEG_OPTIONS,
-            )
+            source = await create_ffmpeg_audio_source(state.current)
         except Exception as exc:
             await send_clean(ctx, f"Could not start FFmpeg: `{exc}`")
             state.current = None
