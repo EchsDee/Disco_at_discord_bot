@@ -406,23 +406,42 @@ def build_ffmpeg_before_options(headers: dict[str, str]) -> str:
 
 
 async def create_ffmpeg_audio_source(track: "Track") -> discord.AudioSource:
+    started_at = time.perf_counter()
     before_options = None if track.is_local_file else build_ffmpeg_before_options(track.http_headers)
+    if track.audio_codec:
+        log_event(f"Starting FFmpeg with yt-dlp audio codec: {track.audio_codec}")
+        source = discord.FFmpegOpusAudio(
+            track.stream_url,
+            bitrate=track.audio_bitrate or 128,
+            codec=track.audio_codec,
+            executable=FFMPEG_EXECUTABLE,
+            before_options=before_options,
+            **FFMPEG_OPTIONS,
+        )
+        log_event(f"FFmpeg audio source ready in {time.perf_counter() - started_at:.2f}s without probing.")
+        return source
+
     try:
-        return await discord.FFmpegOpusAudio.from_probe(
+        log_event("Starting FFmpeg with audio probe fallback.")
+        source = await discord.FFmpegOpusAudio.from_probe(
             track.stream_url,
             method="fallback",
             executable=FFMPEG_EXECUTABLE,
             before_options=before_options,
             **FFMPEG_OPTIONS,
         )
+        log_event(f"FFmpeg audio source ready in {time.perf_counter() - started_at:.2f}s after probing.")
+        return source
     except Exception as exc:
         log_event(f"Opus audio source failed; falling back to PCM: {exc}")
-        return discord.FFmpegPCMAudio(
+        source = discord.FFmpegPCMAudio(
             track.stream_url,
             executable=FFMPEG_EXECUTABLE,
             before_options=before_options,
             **FFMPEG_OPTIONS,
         )
+        log_event(f"FFmpeg PCM fallback ready in {time.perf_counter() - started_at:.2f}s.")
+        return source
 
 
 @dataclass
@@ -435,6 +454,8 @@ class Track:
     thumbnail_url: Optional[str]
     is_local_file: bool = False
     lazy_query: str = ""
+    audio_codec: str = ""
+    audio_bitrate: int = 0
     source_title: str = ""
     source_url: str = ""
     source_thumbnail_url: str = ""
@@ -1692,11 +1713,14 @@ async def extract_ytdl_info_with_retry(extractor: yt_dlp.YoutubeDL, query: str) 
     last_error: Optional[Exception] = None
 
     for attempt in range(1, attempts + 1):
+        started_at = time.perf_counter()
         try:
-            return await asyncio.wait_for(
+            data = await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: extractor.extract_info(query, download=False)),
                 timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
             )
+            log_event(f"yt-dlp extracted media in {time.perf_counter() - started_at:.2f}s: {query}")
+            return data
         except Exception as exc:
             last_error = exc
             if attempt >= attempts or not should_retry_ytdl_error(exc):
@@ -1753,6 +1777,8 @@ async def resolve_lazy_track(track: Track) -> Track:
     track.http_headers = resolved.http_headers
     track.thumbnail_url = resolved.thumbnail_url
     track.lazy_query = ""
+    track.audio_codec = resolved.audio_codec
+    track.audio_bitrate = resolved.audio_bitrate
     return track
 
 
@@ -1808,6 +1834,19 @@ async def spotify_paged_tracks(
 def spotify_image_url(data: dict) -> str:
     images = data.get("images") or []
     return images[0].get("url", "") if images else ""
+
+
+def audio_bitrate_from_data(data: dict) -> int:
+    bitrate = data.get("abr") or data.get("tbr") or 0
+    try:
+        return int(float(bitrate))
+    except (TypeError, ValueError):
+        return 0
+
+
+def audio_codec_from_data(data: dict) -> str:
+    codec = str(data.get("acodec") or "").strip()
+    return "" if codec == "none" else codec
 
 
 async def spotify_tracks_from_query(query: str, requester: str) -> Optional[list[Track]]:
@@ -1879,6 +1918,8 @@ def track_from_data(data: dict, query: str, requester: str) -> Track:
         requester=requester,
         http_headers=data.get("http_headers") or {},
         thumbnail_url=thumbnail_url,
+        audio_codec=audio_codec_from_data(data),
+        audio_bitrate=audio_bitrate_from_data(data),
     )
 
 
