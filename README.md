@@ -99,7 +99,7 @@ Dashboard settings:
 - `YTDL_FORMAT=bestaudio[acodec=opus]/bestaudio/best`: yt-dlp format selector; Opus is preferred to reduce CPU load while streaming to Discord
 - `YTDL_JS_RUNTIME=`: optional JavaScript runtime for yt-dlp challenge solving, for example `deno`
 - `YTDL_RETRIES=3`: retry count for transient yt-dlp extraction failures
-- `YTDL_YOUTUBE_PLAYER_CLIENTS=default,web_embedded`: YouTube player clients used by yt-dlp
+- `YTDL_YOUTUBE_PLAYER_CLIENTS=default`: YouTube player clients used by yt-dlp; keep this narrow for faster startup
 - `SPOTIFY_CLIENT_ID=` and `SPOTIFY_CLIENT_SECRET=`: optional Spotify app credentials for Spotify track, album, and playlist links
 - `SPOTIFY_REDIRECT_URI=`: optional Spotify OAuth callback URL; defaults to `DASHBOARD_PUBLIC_URL/auth/spotify/callback`
 - `SPOTIFY_MARKET=US`: Spotify market used when resolving available tracks
