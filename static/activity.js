@@ -18,6 +18,10 @@ let relayTimer = null;
 let lastRelayFrameAt = 0;
 let relayImageUrl = "";
 let relayEncoding = false;
+const RELAY_FRAME_INTERVAL_MS = 33;
+const RELAY_MAX_WIDTH = 720;
+const RELAY_JPEG_QUALITY = 0.38;
+const RELAY_MAX_BUFFERED_BYTES = 500_000;
 
 const statusPill = document.getElementById("statusPill");
 const localVideo = document.getElementById("localVideo");
@@ -75,7 +79,7 @@ function showRelayFrame(blob) {
 
 function sendBinary(payload) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  if (socket.bufferedAmount > 2_000_000) return;
+  if (socket.bufferedAmount > RELAY_MAX_BUFFERED_BYTES) return;
   socket.send(payload);
 }
 
@@ -237,7 +241,7 @@ function startFrameRelay() {
 
     const sourceWidth = localVideo.videoWidth || 1280;
     const sourceHeight = localVideo.videoHeight || 720;
-    const maxWidth = 1600;
+    const maxWidth = RELAY_MAX_WIDTH;
     const scale = Math.min(1, maxWidth / sourceWidth);
     const width = Math.max(1, Math.round(sourceWidth * scale));
     const height = Math.max(1, Math.round(sourceHeight * scale));
@@ -254,8 +258,8 @@ function startFrameRelay() {
       if (blob) {
         sendBinary(blob);
       }
-    }, "image/webp", 0.58);
-  }, 80);
+    }, "image/jpeg", RELAY_JPEG_QUALITY);
+  }, RELAY_FRAME_INTERVAL_MS);
 }
 
 function handleBinaryFrame(data) {
@@ -274,7 +278,7 @@ function handleBinaryFrame(data) {
   }
 
   const imageBytes = bytes.slice(2 + headerLength);
-  showRelayFrame(new Blob([imageBytes], { type: "image/webp" }));
+  showRelayFrame(new Blob([imageBytes], { type: "image/jpeg" }));
 }
 
 async function handleSocketMessage(event) {
