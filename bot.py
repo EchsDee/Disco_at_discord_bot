@@ -197,6 +197,17 @@ def verify_activity_session(token: str, room_id: str) -> Optional[dict]:
     return payload
 
 
+def is_discord_activity_request(request: web.Request) -> bool:
+    activity_query_keys = {
+        "channel_id",
+        "frame_id",
+        "guild_id",
+        "instance_id",
+        "platform",
+    }
+    return bool(activity_query_keys.intersection(request.query.keys()))
+
+
 def make_dashboard_session(payload: dict) -> str:
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -269,7 +280,7 @@ async def dashboard_auth_middleware(request: web.Request, handler):
         "/activity",
         "/activity/token",
     }
-    if request.path in public_paths or request.path.startswith("/static/") or request.path.startswith("/activity/ws/"):
+    if request.path in public_paths or request.path.startswith("/static/") or request.path.startswith("/activity/"):
         return await handler(request)
 
     user = get_dashboard_user(request)
@@ -866,6 +877,8 @@ def guild_to_payload(guild: discord.Guild) -> dict:
 
 
 async def dashboard_index(request: web.Request) -> web.Response:
+    if is_discord_activity_request(request):
+        return await activity_index(request)
     return web.Response(text=DASHBOARD_HTML, content_type="text/html")
 
 
@@ -1669,6 +1682,8 @@ async def start_dashboard() -> None:
     app.router.add_get("/terms", terms_page)
     app.router.add_get("/privacy", privacy_page)
     app.router.add_get("/activity", activity_index)
+    app.router.add_get("/activity/", activity_index)
+    app.router.add_get("/activity/index.html", activity_index)
     app.router.add_post("/activity/token", activity_token)
     app.router.add_get("/activity/ws/{room_id}", activity_signal)
     app.router.add_get("/login", dashboard_login_page)

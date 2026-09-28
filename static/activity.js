@@ -1,4 +1,4 @@
-import { DiscordSDK } from "https://esm.sh/@discord/embedded-app-sdk@1";
+import { DiscordSDK } from "/static/vendor/discord-embedded-app-sdk/index.mjs";
 
 const config = window.ACTIVITY_CONFIG || {};
 const peerId = crypto.randomUUID();
