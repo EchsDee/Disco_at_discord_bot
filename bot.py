@@ -980,47 +980,66 @@ async def activity_signal(request: web.Request) -> web.WebSocketResponse:
 
     try:
         async for message in websocket:
-            if message.type != web.WSMsgType.TEXT:
-                continue
-
-            try:
-                payload = json.loads(message.data)
-            except json.JSONDecodeError:
-                continue
-
-            payload_type = payload.get("type")
-            if payload_type == "join":
-                peer_id = str(payload.get("peerId", "")).strip()[:80]
+            if message.type == web.WSMsgType.BINARY:
                 if not peer_id:
                     continue
 
-                websocket["peer_id"] = peer_id
-                room.add(websocket)
-                peers = [
-                    other.get("peer_id")
-                    for other in room
-                    if other is not websocket and other.get("peer_id")
-                ]
-                await websocket.send_json({"type": "peers", "peers": peers})
+                header = json.dumps({"type": "relay-frame", "from": peer_id}, separators=(",", ":")).encode("utf-8")
+                if len(header) > 65535:
+                    continue
+                frame = len(header).to_bytes(2, "big") + header + bytes(message.data)
+                dead_sockets = []
+                for other in room:
+                    if other is websocket:
+                        continue
+                    try:
+                        await other.send_bytes(frame)
+                    except ConnectionResetError:
+                        dead_sockets.append(other)
 
-            if not peer_id:
+                for dead_socket in dead_sockets:
+                    room.discard(dead_socket)
                 continue
 
-            payload["from"] = peer_id
-            target_peer_id = str(payload.get("to", "")).strip()
-            dead_sockets = []
-            for other in room:
-                if other is websocket:
-                    continue
-                if target_peer_id and other.get("peer_id") != target_peer_id:
-                    continue
+            if message.type == web.WSMsgType.TEXT:
                 try:
-                    await other.send_json(payload)
-                except ConnectionResetError:
-                    dead_sockets.append(other)
+                    payload = json.loads(message.data)
+                except json.JSONDecodeError:
+                    continue
 
-            for dead_socket in dead_sockets:
-                room.discard(dead_socket)
+                payload_type = payload.get("type")
+                if payload_type == "join":
+                    peer_id = str(payload.get("peerId", "")).strip()[:80]
+                    if not peer_id:
+                        continue
+
+                    websocket["peer_id"] = peer_id
+                    room.add(websocket)
+                    peers = [
+                        other.get("peer_id")
+                        for other in room
+                        if other is not websocket and other.get("peer_id")
+                    ]
+                    await websocket.send_json({"type": "peers", "peers": peers})
+
+                if not peer_id:
+                    continue
+
+                payload["from"] = peer_id
+                target_peer_id = str(payload.get("to", "")).strip()
+                dead_sockets = []
+                for other in room:
+                    if other is websocket:
+                        continue
+                    if target_peer_id and other.get("peer_id") != target_peer_id:
+                        continue
+                    try:
+                        await other.send_json(payload)
+                    except ConnectionResetError:
+                        dead_sockets.append(other)
+
+                for dead_socket in dead_sockets:
+                    room.discard(dead_socket)
     finally:
         room.discard(websocket)
         if peer_id:

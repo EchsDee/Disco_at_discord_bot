@@ -16,6 +16,8 @@ let localStream = null;
 let signalToken = "";
 let relayTimer = null;
 let lastRelayFrameAt = 0;
+let relayImageUrl = "";
+let relayEncoding = false;
 
 const statusPill = document.getElementById("statusPill");
 const localVideo = document.getElementById("localVideo");
@@ -55,16 +57,26 @@ function refreshEmptyState() {
   emptyState.style.display = "";
 }
 
-function showRelayFrame(dataUrl) {
-  if (!dataUrl) return;
+function showRelayFrame(blob) {
+  if (!blob) return;
   lastRelayFrameAt = Date.now();
   localVideo.pause();
   localVideo.srcObject = null;
   localVideo.style.display = "none";
-  relayImage.src = dataUrl;
+  if (relayImageUrl) {
+    URL.revokeObjectURL(relayImageUrl);
+  }
+  relayImageUrl = URL.createObjectURL(blob);
+  relayImage.src = relayImageUrl;
   relayImage.style.display = "block";
   emptyState.style.display = "none";
   setStatus("Receiving screen relay");
+}
+
+function sendBinary(payload) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (socket.bufferedAmount > 2_000_000) return;
+  socket.send(payload);
 }
 
 function send(payload) {
@@ -219,13 +231,13 @@ function startFrameRelay() {
   if (!context) return;
 
   relayTimer = setInterval(() => {
-    if (!localStream || socket?.readyState !== WebSocket.OPEN || localVideo.readyState < 2) {
+    if (relayEncoding || !localStream || socket?.readyState !== WebSocket.OPEN || localVideo.readyState < 2) {
       return;
     }
 
     const sourceWidth = localVideo.videoWidth || 1280;
     const sourceHeight = localVideo.videoHeight || 720;
-    const maxWidth = 1280;
+    const maxWidth = 1600;
     const scale = Math.min(1, maxWidth / sourceWidth);
     const width = Math.max(1, Math.round(sourceWidth * scale));
     const height = Math.max(1, Math.round(sourceHeight * scale));
@@ -236,13 +248,94 @@ function startFrameRelay() {
     }
 
     context.drawImage(localVideo, 0, 0, width, height);
-    send({
-      type: "relay-frame",
-      image: canvas.toDataURL("image/jpeg", 0.62),
-      width,
-      height,
+    relayEncoding = true;
+    canvas.toBlob((blob) => {
+      relayEncoding = false;
+      if (blob) {
+        sendBinary(blob);
+      }
+    }, "image/webp", 0.58);
+  }, 80);
+}
+
+function handleBinaryFrame(data) {
+  const bytes = new Uint8Array(data);
+  if (bytes.length < 2) return;
+
+  const headerLength = (bytes[0] << 8) | bytes[1];
+  if (bytes.length < 2 + headerLength) return;
+
+  try {
+    const headerText = new TextDecoder().decode(bytes.slice(2, 2 + headerLength));
+    const header = JSON.parse(headerText);
+    if (header.from === peerId || header.type !== "relay-frame") return;
+  } catch {
+    return;
+  }
+
+  const imageBytes = bytes.slice(2 + headerLength);
+  showRelayFrame(new Blob([imageBytes], { type: "image/webp" }));
+}
+
+async function handleSocketMessage(event) {
+  if (event.data instanceof Blob) {
+    handleBinaryFrame(await event.data.arrayBuffer());
+    return;
+  }
+  if (event.data instanceof ArrayBuffer) {
+    handleBinaryFrame(event.data);
+    return;
+  }
+
+  const message = JSON.parse(event.data);
+  if (message.from === peerId) return;
+
+  if (message.type === "peers") {
+    if (captureMode) {
+      setStatus(`Capture window connected (${(message.peers || []).length} viewer${(message.peers || []).length === 1 ? "" : "s"})`);
+    }
+    for (const remotePeerId of message.peers || []) {
+      knownPeers.add(remotePeerId);
+      if (localStream) await offerShareTo(remotePeerId);
+    }
+  }
+  if (message.type === "join") {
+    knownPeers.add(message.from);
+    if (localStream) await offerShareTo(message.from);
+  }
+  if (message.type === "offer") await handleOffer(message);
+  if (message.type === "answer") await handleAnswer(message);
+  if (message.type === "candidate") await handleCandidate(message);
+  if (message.type === "share-started" && !captureMode) {
+    setStatus("Receiving screen...");
+  }
+  if (message.type === "relay-frame" && !captureMode) {
+    const response = await fetch(message.image);
+    showRelayFrame(await response.blob());
+  }
+  if (message.type === "share-stopped" || message.type === "peer-left") removePeer(message.from);
+}
+
+function connectSignaling() {
+  socket = new WebSocket(websocketUrl(roomId, signalToken));
+  socket.binaryType = "arraybuffer";
+
+  socket.addEventListener("open", () => {
+    if (captureMode) {
+      setStatus("Capture window connected");
+    } else {
+      setStatus(auth?.user?.username ? `Connected as ${auth.user.username}` : "Connected");
+    }
+    send({ type: "join" });
+  });
+
+  socket.addEventListener("message", (event) => {
+    handleSocketMessage(event).catch((error) => {
+      notice.textContent = `Activity connection error: ${error.message}`;
     });
-  }, 250);
+  });
+
+  socket.addEventListener("close", () => setStatus("Disconnected"));
 }
 
 function renderRemoteTile(remotePeerId, stream) {
@@ -283,50 +376,6 @@ function removePeer(remotePeerId) {
       refreshEmptyState();
     }
   }
-}
-
-function connectSignaling() {
-  socket = new WebSocket(websocketUrl(roomId, signalToken));
-
-  socket.addEventListener("open", () => {
-    if (captureMode) {
-      setStatus("Capture window connected");
-    } else {
-      setStatus(auth?.user?.username ? `Connected as ${auth.user.username}` : "Connected");
-    }
-    send({ type: "join" });
-  });
-
-  socket.addEventListener("message", async (event) => {
-    const message = JSON.parse(event.data);
-    if (message.from === peerId) return;
-
-    if (message.type === "peers") {
-      if (captureMode) {
-        setStatus(`Capture window connected (${(message.peers || []).length} viewer${(message.peers || []).length === 1 ? "" : "s"})`);
-      }
-      for (const remotePeerId of message.peers || []) {
-        knownPeers.add(remotePeerId);
-        if (localStream) await offerShareTo(remotePeerId);
-      }
-    }
-    if (message.type === "join") {
-      knownPeers.add(message.from);
-      if (localStream) await offerShareTo(message.from);
-    }
-    if (message.type === "offer") await handleOffer(message);
-    if (message.type === "answer") await handleAnswer(message);
-    if (message.type === "candidate") await handleCandidate(message);
-    if (message.type === "share-started" && !captureMode) {
-      setStatus("Receiving screen...");
-    }
-    if (message.type === "relay-frame" && !captureMode) {
-      showRelayFrame(message.image);
-    }
-    if (message.type === "share-stopped" || message.type === "peer-left") removePeer(message.from);
-  });
-
-  socket.addEventListener("close", () => setStatus("Disconnected"));
 }
 
 async function startSharing() {
