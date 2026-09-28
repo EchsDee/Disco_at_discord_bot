@@ -1,6 +1,8 @@
 import { DiscordSDK } from "/static/vendor/discord-embedded-app-sdk/index.mjs";
 
 const config = window.ACTIVITY_CONFIG || {};
+const params = new URLSearchParams(location.search);
+const captureMode = Boolean(config.captureMode);
 const peerId = crypto.randomUUID();
 const peers = new Map();
 const knownPeers = new Set();
@@ -36,6 +38,28 @@ function websocketUrl(room, token) {
   return `${protocol}//${location.host}/activity/ws/${encodeURIComponent(room)}?token=${encodeURIComponent(token)}`;
 }
 
+function captureUrl() {
+  const url = new URL("/activity/capture", config.publicUrl || location.origin);
+  url.searchParams.set("room", roomId);
+  url.searchParams.set("token", signalToken);
+  return url.toString();
+}
+
+async function openCaptureWindow() {
+  if (!roomId || !signalToken) {
+    notice.textContent = "Activity is still connecting. Try again in a moment.";
+    return;
+  }
+
+  const url = captureUrl();
+  if (discordSdk?.commands?.openExternalLink) {
+    await discordSdk.commands.openExternalLink({ url });
+    return;
+  }
+
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 async function authenticateActivity() {
   if (!config.clientId) {
     throw new Error("Activity client ID is not configured.");
@@ -67,6 +91,16 @@ async function authenticateActivity() {
 
   signalToken = data.signal_token;
   auth = await discordSdk.commands.authenticate({ access_token: data.access_token });
+}
+
+function authenticateCaptureWindow() {
+  roomId = params.get("room") || "";
+  signalToken = params.get("token") || "";
+  if (!roomId || !signalToken) {
+    throw new Error("Missing capture room. Open this window from the Discord Activity.");
+  }
+
+  roomLabel.textContent = `Room: ${roomId}`;
 }
 
 function createPeerConnection(remotePeerId) {
@@ -155,7 +189,11 @@ function connectSignaling() {
   socket = new WebSocket(websocketUrl(roomId, signalToken));
 
   socket.addEventListener("open", () => {
-    setStatus(auth?.user?.username ? `Connected as ${auth.user.username}` : "Connected");
+    if (captureMode) {
+      setStatus("Capture window connected");
+    } else {
+      setStatus(auth?.user?.username ? `Connected as ${auth.user.username}` : "Connected");
+    }
     send({ type: "join" });
   });
 
@@ -215,7 +253,11 @@ function stopSharing() {
 
 shareButton.addEventListener("click", async () => {
   try {
-    await startSharing();
+    if (captureMode) {
+      await startSharing();
+    } else {
+      await openCaptureWindow();
+    }
   } catch (error) {
     notice.textContent = `Could not start screen share: ${error.message}`;
   }
@@ -223,8 +265,23 @@ shareButton.addEventListener("click", async () => {
 stopButton.addEventListener("click", stopSharing);
 
 try {
-  setStatus("Authenticating...");
-  await authenticateActivity();
+  if (captureMode) {
+    document.title = "Disco Capture Window";
+    document.querySelector("h1").textContent = "Capture Window";
+    emptyState.querySelector("strong").textContent = "Ready to share from this browser.";
+    emptyState.querySelector("span").textContent = "Choose a screen or window here; viewers stay inside Discord.";
+    shareButton.textContent = "Start Capture";
+    setStatus("Connecting...");
+    authenticateCaptureWindow();
+  } else {
+    document.querySelector("h1").textContent = "Screen Room";
+    emptyState.querySelector("strong").textContent = "No screen is sharing.";
+    emptyState.querySelector("span").textContent = "Open a capture window to share into this Activity.";
+    shareButton.textContent = "Open Capture Window";
+    stopButton.style.display = "none";
+    setStatus("Authenticating...");
+    await authenticateActivity();
+  }
   notice.textContent = "";
   connectSignaling();
 } catch (error) {

@@ -890,15 +890,30 @@ async def privacy_page(request: web.Request) -> web.Response:
     return web.Response(text=PRIVACY_HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
-async def activity_index(request: web.Request) -> web.Response:
-    html = (
+def render_activity_html(capture_mode: bool = False) -> str:
+    config_message = ""
+    if not capture_mode and not activity_oauth_enabled():
+        config_message = "Activity OAuth is not configured yet. Set CUSTOM_ACTIVITY_APPLICATION_ID and CUSTOM_ACTIVITY_CLIENT_SECRET."
+
+    return (
         ACTIVITY_HTML.replace("{{ACTIVITY_CLIENT_ID}}", str(CUSTOM_ACTIVITY_APPLICATION_ID or ""))
-        .replace(
-            "{{CONFIG_MESSAGE}}",
-            "" if activity_oauth_enabled() else "Activity OAuth is not configured yet. Set CUSTOM_ACTIVITY_APPLICATION_ID and CUSTOM_ACTIVITY_CLIENT_SECRET.",
-        )
+        .replace("{{ACTIVITY_PUBLIC_URL}}", dashboard_public_url())
+        .replace("{{CAPTURE_MODE}}", "true" if capture_mode else "false")
+        .replace("{{CONFIG_MESSAGE}}", config_message)
     )
-    return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+async def activity_index(request: web.Request) -> web.Response:
+    return web.Response(text=render_activity_html(), content_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+async def activity_capture(request: web.Request) -> web.Response:
+    room_id = str(request.query.get("room", "")).strip()
+    token = str(request.query.get("token", "")).strip()
+    if not room_id or not verify_activity_session(token, room_id):
+        return web.Response(text="Invalid or expired capture link. Open a fresh capture window from the Discord Activity.", status=401)
+
+    return web.Response(text=render_activity_html(capture_mode=True), content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 async def activity_token(request: web.Request) -> web.Response:
@@ -1684,6 +1699,7 @@ async def start_dashboard() -> None:
     app.router.add_get("/activity", activity_index)
     app.router.add_get("/activity/", activity_index)
     app.router.add_get("/activity/index.html", activity_index)
+    app.router.add_get("/activity/capture", activity_capture)
     app.router.add_post("/activity/token", activity_token)
     app.router.add_get("/activity/ws/{room_id}", activity_signal)
     app.router.add_get("/login", dashboard_login_page)

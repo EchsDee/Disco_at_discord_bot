@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Disco Screen Activity</title>
-  <link rel="stylesheet" href="/static/activity.css?v=20260923-screen">
+  <link rel="stylesheet" href="/static/activity.css?v=20260928-capture">
 </head>
 <body>
   <main class="activity-shell">
@@ -37,8 +37,10 @@
   <script>
     window.ACTIVITY_CONFIG = {
       clientId: "{{ACTIVITY_CLIENT_ID}}",
+      publicUrl: "{{ACTIVITY_PUBLIC_URL}}",
+      captureMode: {{CAPTURE_MODE}},
     };
   </script>
-  <script type="module" src="/static/activity.js?v=20260923-screen"></script>
+  <script type="module" src="/static/activity.js?v=20260928-capture"></script>
 </body>
 </html>
