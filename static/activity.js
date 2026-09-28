@@ -14,9 +14,12 @@ let roomId = "";
 let socket = null;
 let localStream = null;
 let signalToken = "";
+let relayTimer = null;
+let lastRelayFrameAt = 0;
 
 const statusPill = document.getElementById("statusPill");
 const localVideo = document.getElementById("localVideo");
+const relayImage = document.getElementById("relayImage");
 const emptyState = document.getElementById("emptyState");
 const shareButton = document.getElementById("shareButton");
 const stopButton = document.getElementById("stopButton");
@@ -29,7 +32,9 @@ function setStatus(text) {
 }
 
 function showStreamInMainPanel(stream) {
+  relayImage.style.display = "none";
   localVideo.muted = true;
+  localVideo.style.display = "";
   localVideo.srcObject = stream;
   emptyState.style.display = "none";
   localVideo.play().catch(() => {
@@ -44,7 +49,22 @@ function refreshEmptyState() {
   }
 
   localVideo.srcObject = null;
+  localVideo.style.display = "";
+  relayImage.removeAttribute("src");
+  relayImage.style.display = "none";
   emptyState.style.display = "";
+}
+
+function showRelayFrame(dataUrl) {
+  if (!dataUrl) return;
+  lastRelayFrameAt = Date.now();
+  localVideo.pause();
+  localVideo.srcObject = null;
+  localVideo.style.display = "none";
+  relayImage.src = dataUrl;
+  relayImage.style.display = "block";
+  emptyState.style.display = "none";
+  setStatus("Receiving screen relay");
 }
 
 function send(payload) {
@@ -183,6 +203,48 @@ async function handleCandidate(message) {
   }
 }
 
+function stopFrameRelay() {
+  if (relayTimer) {
+    clearInterval(relayTimer);
+    relayTimer = null;
+  }
+}
+
+function startFrameRelay() {
+  stopFrameRelay();
+  if (!captureMode || !localStream) return;
+
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) return;
+
+  relayTimer = setInterval(() => {
+    if (!localStream || socket?.readyState !== WebSocket.OPEN || localVideo.readyState < 2) {
+      return;
+    }
+
+    const sourceWidth = localVideo.videoWidth || 1280;
+    const sourceHeight = localVideo.videoHeight || 720;
+    const maxWidth = 1280;
+    const scale = Math.min(1, maxWidth / sourceWidth);
+    const width = Math.max(1, Math.round(sourceWidth * scale));
+    const height = Math.max(1, Math.round(sourceHeight * scale));
+
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+
+    context.drawImage(localVideo, 0, 0, width, height);
+    send({
+      type: "relay-frame",
+      image: canvas.toDataURL("image/jpeg", 0.62),
+      width,
+      height,
+    });
+  }, 250);
+}
+
 function renderRemoteTile(remotePeerId, stream) {
   if (!captureMode && !localVideo.srcObject) {
     showStreamInMainPanel(stream);
@@ -213,7 +275,7 @@ function removePeer(remotePeerId) {
   remoteStreams.delete(remotePeerId);
   document.getElementById(`peer-${remotePeerId}`)?.remove();
 
-  if (!captureMode && localVideo.srcObject) {
+  if (!captureMode) {
     const nextStream = remoteStreams.values().next().value;
     if (nextStream) {
       showStreamInMainPanel(nextStream);
@@ -258,6 +320,9 @@ function connectSignaling() {
     if (message.type === "share-started" && !captureMode) {
       setStatus("Receiving screen...");
     }
+    if (message.type === "relay-frame" && !captureMode) {
+      showRelayFrame(message.image);
+    }
     if (message.type === "share-stopped" || message.type === "peer-left") removePeer(message.from);
   });
 
@@ -270,6 +335,8 @@ async function startSharing() {
     audio: true,
   });
   localVideo.srcObject = localStream;
+  localVideo.style.display = "";
+  relayImage.style.display = "none";
   emptyState.style.display = "none";
   shareButton.disabled = true;
   stopButton.disabled = false;
@@ -282,11 +349,13 @@ async function startSharing() {
     await offerShareTo(remotePeerId);
   }
   send({ type: "share-started" });
+  startFrameRelay();
 }
 
 function stopSharing() {
   if (!localStream) return;
   for (const track of localStream.getTracks()) track.stop();
+  stopFrameRelay();
   localStream = null;
   localVideo.srcObject = null;
   refreshEmptyState();
