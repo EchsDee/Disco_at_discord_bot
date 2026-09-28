@@ -530,6 +530,10 @@ button:focus-visible {
   padding: 0 12px;
 }
 
+.nav-link {
+  text-decoration: none;
+}
+
 .nav-child {
   padding: 0 12px 0 44px;
   color: #d8d2e6;

@@ -260,6 +260,8 @@ def visible_dashboard_guilds(request: web.Request) -> list[discord.Guild]:
 async def dashboard_auth_middleware(request: web.Request, handler):
     public_paths = {
         "/login",
+        "/terms",
+        "/privacy",
         "/api/login",
         "/auth/discord/start",
         "/auth/discord/callback",
@@ -865,6 +867,14 @@ def guild_to_payload(guild: discord.Guild) -> dict:
 
 async def dashboard_index(request: web.Request) -> web.Response:
     return web.Response(text=DASHBOARD_HTML, content_type="text/html")
+
+
+async def terms_page(request: web.Request) -> web.Response:
+    return web.Response(text=TERMS_HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+async def privacy_page(request: web.Request) -> web.Response:
+    return web.Response(text=PRIVACY_HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 async def activity_index(request: web.Request) -> web.Response:
@@ -1656,6 +1666,8 @@ async def start_dashboard() -> None:
 
     app = web.Application(middlewares=[dashboard_auth_middleware])
     app.router.add_get("/", dashboard_index)
+    app.router.add_get("/terms", terms_page)
+    app.router.add_get("/privacy", privacy_page)
     app.router.add_get("/activity", activity_index)
     app.router.add_post("/activity/token", activity_token)
     app.router.add_get("/activity/ws/{room_id}", activity_signal)
@@ -1717,6 +1729,8 @@ def start_tray_icon() -> None:
 
 DASHBOARD_TEMPLATE_PATH = Path(__file__).with_name("templates") / "dashboard.html"
 DASHBOARD_LOGIN_TEMPLATE_PATH = Path(__file__).with_name("templates") / "dashboard_login.html"
+TERMS_TEMPLATE_PATH = Path(__file__).with_name("templates") / "terms.html"
+PRIVACY_TEMPLATE_PATH = Path(__file__).with_name("templates") / "privacy.html"
 ACTIVITY_TEMPLATE_PATH = Path(__file__).with_name("templates") / "activity.html"
 
 
@@ -1728,12 +1742,22 @@ def load_dashboard_login_html() -> str:
     return DASHBOARD_LOGIN_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
+def load_terms_html() -> str:
+    return TERMS_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+def load_privacy_html() -> str:
+    return PRIVACY_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
 def load_activity_html() -> str:
     return ACTIVITY_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
 DASHBOARD_HTML = load_dashboard_html()
 DASHBOARD_LOGIN_HTML = load_dashboard_login_html()
+TERMS_HTML = load_terms_html()
+PRIVACY_HTML = load_privacy_html()
 ACTIVITY_HTML = load_activity_html()
 
 
