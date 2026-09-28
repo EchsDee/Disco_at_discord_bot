@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Disco Screen Activity</title>
+  <link rel="stylesheet" href="/static/activity.css?v=20260923-screen">
+</head>
+<body>
+  <main class="activity-shell">
+    <header class="activity-header">
+      <div>
+        <p class="eyebrow">Disco Activity</p>
+        <h1>Screen Room</h1>
+      </div>
+      <div class="status-pill" id="statusPill">Starting...</div>
+    </header>
+
+    <section class="hero-panel">
+      <video id="localVideo" autoplay muted playsinline></video>
+      <div class="empty-state" id="emptyState">
+        <strong>No local screen is sharing.</strong>
+        <span>Anyone in this Activity can start sharing their screen.</span>
+      </div>
+    </section>
+
+    <section class="toolbar">
+      <button id="shareButton" type="button">Share Screen</button>
+      <button id="stopButton" type="button" disabled>Stop Sharing</button>
+      <span id="roomLabel">Room: loading</span>
+    </section>
+
+    <section class="grid" id="remoteGrid" aria-label="Remote screen shares"></section>
+    <p class="notice" id="notice">{{CONFIG_MESSAGE}}</p>
+  </main>
+
+  <script>
+    window.ACTIVITY_CONFIG = {
+      clientId: "{{ACTIVITY_CLIENT_ID}}",
+    };
+  </script>
+  <script type="module" src="/static/activity.js?v=20260923-screen"></script>
+</body>
+</html>

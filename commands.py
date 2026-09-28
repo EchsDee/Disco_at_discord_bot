@@ -22,6 +22,8 @@ def register_music_commands(app: dict) -> None:
     player_loop = app["player_loop"]
     build_queue_embed = app["build_queue_embed"]
     log_error = app["log_error"]
+    watch_together_application_id = app["WATCH_TOGETHER_APPLICATION_ID"]
+    custom_activity_application_id = app["CUSTOM_ACTIVITY_APPLICATION_ID"]
 
     @commands.guild_only()
     @commands.has_guild_permissions(manage_channels=True)
@@ -49,7 +51,7 @@ def register_music_commands(app: dict) -> None:
             description="Use this channel for music commands and queue controls.",
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="Commands", value="`/play`, `/queue`, `/pause`, `/resume`, `/skip`, `/stop`, `/leave`, `/clear`")
+        embed.add_field(name="Commands", value="`/play`, `/queue`, `/pause`, `/resume`, `/skip`, `/stop`, `/leave`, `/clear`, `/watch_together`, `/screen_activity`")
         await send_clean_to_channel(ctx.guild.id, channel, embed=embed, view=music_control_view())
         await ctx.send(f"Music bot channel set to {channel.mention}.", ephemeral=bool(ctx.interaction))
 
@@ -124,6 +126,65 @@ def register_music_commands(app: dict) -> None:
     async def queue(ctx: commands.Context) -> None:
         await acknowledge_music_routing(ctx)
         await send_clean(ctx, embed=build_queue_embed(ctx.guild.id), view=music_control_view())
+
+    @commands.guild_only()
+    @commands.bot_has_guild_permissions(create_instant_invite=True)
+    @bot.hybrid_command(name="watch_together", aliases=["activity"], description="Create a Watch Together Activity invite for a voice channel.")
+    async def watch_together(ctx: commands.Context, channel: discord.VoiceChannel = None) -> None:
+        acknowledged = await acknowledge_music_routing(ctx)
+
+        if ctx.interaction and not acknowledged:
+            await ctx.defer(ephemeral=True)
+
+        if channel is None:
+            if not ctx.author.voice or not ctx.author.voice.channel:
+                raise commands.CommandError("Join a voice channel first, or choose a voice channel.")
+            channel = ctx.author.voice.channel
+
+        invite = await channel.create_invite(
+            max_age=3600,
+            max_uses=0,
+            unique=True,
+            target_type=discord.InviteTarget.embedded_application,
+            target_application_id=watch_together_application_id,
+            reason=f"Watch Together Activity requested by {ctx.author}",
+        )
+        await send_clean(
+            ctx,
+            f"Watch Together for {channel.mention}: {invite.url}",
+            ephemeral=bool(ctx.interaction),
+        )
+
+    @commands.guild_only()
+    @commands.bot_has_guild_permissions(create_instant_invite=True)
+    @bot.hybrid_command(name="screen_activity", description="Create a custom screen-share Activity invite for a voice channel.")
+    async def screen_activity(ctx: commands.Context, channel: discord.VoiceChannel = None) -> None:
+        acknowledged = await acknowledge_music_routing(ctx)
+
+        if ctx.interaction and not acknowledged:
+            await ctx.defer(ephemeral=True)
+
+        if not custom_activity_application_id:
+            raise commands.CommandError("Custom Activity is not configured yet. Set CUSTOM_ACTIVITY_APPLICATION_ID.")
+
+        if channel is None:
+            if not ctx.author.voice or not ctx.author.voice.channel:
+                raise commands.CommandError("Join a voice channel first, or choose a voice channel.")
+            channel = ctx.author.voice.channel
+
+        invite = await channel.create_invite(
+            max_age=3600,
+            max_uses=0,
+            unique=True,
+            target_type=discord.InviteTarget.embedded_application,
+            target_application_id=custom_activity_application_id,
+            reason=f"Custom screen Activity requested by {ctx.author}",
+        )
+        await send_clean(
+            ctx,
+            f"Screen Activity for {channel.mention}: {invite.url}",
+            ephemeral=bool(ctx.interaction),
+        )
 
     @commands.guild_only()
     @commands.has_guild_permissions(manage_messages=True)

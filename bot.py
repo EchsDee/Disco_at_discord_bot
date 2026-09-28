@@ -66,6 +66,9 @@ YTDL_YOUTUBE_PLAYER_CLIENTS = os.getenv("YTDL_YOUTUBE_PLAYER_CLIENTS", "default"
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 SPOTIFY_MARKET = os.getenv("SPOTIFY_MARKET", "US")
+WATCH_TOGETHER_APPLICATION_ID = int(os.getenv("WATCH_TOGETHER_APPLICATION_ID", "880218394199220334"))
+CUSTOM_ACTIVITY_APPLICATION_ID = int(os.getenv("CUSTOM_ACTIVITY_APPLICATION_ID") or DISCORD_CLIENT_ID or "0")
+CUSTOM_ACTIVITY_CLIENT_SECRET = os.getenv("CUSTOM_ACTIVITY_CLIENT_SECRET") or DISCORD_CLIENT_SECRET
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN. Put it in a .env file or environment variable.")
@@ -83,6 +86,7 @@ tray_started = False
 dashboard_runner: Optional[web.AppRunner] = None
 recent_logs: deque[str] = deque(maxlen=500)
 dashboard_login_user_records: dict[str, dict] = {}
+activity_rooms: dict[str, set[web.WebSocketResponse]] = {}
 
 
 def log_event(message: str) -> None:
@@ -161,6 +165,38 @@ def verify_signed_value(signed_value: str) -> Optional[str]:
     return value if hmac.compare_digest(signed_value, expected) else None
 
 
+def activity_oauth_enabled() -> bool:
+    return bool(CUSTOM_ACTIVITY_APPLICATION_ID and CUSTOM_ACTIVITY_CLIENT_SECRET)
+
+
+def sign_activity_session(room_id: str, user: dict) -> str:
+    payload = {
+        "room": room_id,
+        "user_id": str(user.get("id", "")),
+        "name": str(user.get("global_name") or user.get("username") or user.get("id", "Guest")),
+        "exp": int(time.time()) + 60 * 60 * 6,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+    return sign_value(encoded)
+
+
+def verify_activity_session(token: str, room_id: str) -> Optional[dict]:
+    encoded = verify_signed_value(token)
+    if not encoded:
+        return None
+
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+    if payload.get("room") != room_id or int(payload.get("exp", 0)) < int(time.time()):
+        return None
+    return payload
+
+
 def make_dashboard_session(payload: dict) -> str:
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -228,8 +264,10 @@ async def dashboard_auth_middleware(request: web.Request, handler):
         "/auth/discord/start",
         "/auth/discord/callback",
         "/auth/spotify/callback",
+        "/activity",
+        "/activity/token",
     }
-    if request.path in public_paths or request.path.startswith("/static/"):
+    if request.path in public_paths or request.path.startswith("/static/") or request.path.startswith("/activity/ws/"):
         return await handler(request)
 
     user = get_dashboard_user(request)
@@ -827,6 +865,136 @@ def guild_to_payload(guild: discord.Guild) -> dict:
 
 async def dashboard_index(request: web.Request) -> web.Response:
     return web.Response(text=DASHBOARD_HTML, content_type="text/html")
+
+
+async def activity_index(request: web.Request) -> web.Response:
+    html = (
+        ACTIVITY_HTML.replace("{{ACTIVITY_CLIENT_ID}}", str(CUSTOM_ACTIVITY_APPLICATION_ID or ""))
+        .replace(
+            "{{CONFIG_MESSAGE}}",
+            "" if activity_oauth_enabled() else "Activity OAuth is not configured yet. Set CUSTOM_ACTIVITY_APPLICATION_ID and CUSTOM_ACTIVITY_CLIENT_SECRET.",
+        )
+    )
+    return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+async def activity_token(request: web.Request) -> web.Response:
+    if not activity_oauth_enabled():
+        return web.json_response({"ok": False, "error": "Activity OAuth is not configured."}, status=400)
+
+    data = await request.json()
+    code = str(data.get("code", "")).strip()
+    room_id = str(data.get("room", "")).strip()[:80]
+    if not code or not room_id:
+        return web.json_response({"ok": False, "error": "Missing Activity authorization code or room."}, status=400)
+
+    async with ClientSession() as session:
+        token_response = await session.post(
+            "https://discord.com/api/oauth2/token",
+            data={
+                "client_id": str(CUSTOM_ACTIVITY_APPLICATION_ID),
+                "client_secret": CUSTOM_ACTIVITY_CLIENT_SECRET,
+                "grant_type": "authorization_code",
+                "code": code,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        token_data = await token_response.json(content_type=None)
+        if token_response.status != 200 or not token_data.get("access_token"):
+            log_event(f"Activity token exchange failed: {token_data}")
+            return web.json_response({"ok": False, "error": "Discord Activity authentication failed."}, status=401)
+
+        access_token = token_data["access_token"]
+        user_response = await session.get(
+            "https://discord.com/api/users/@me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        user_data = await user_response.json(content_type=None)
+        if user_response.status != 200:
+            log_event(f"Activity user lookup failed: {user_data}")
+            return web.json_response({"ok": False, "error": "Could not load Discord Activity user."}, status=401)
+
+    return web.json_response(
+        {
+            "ok": True,
+            "access_token": access_token,
+            "signal_token": sign_activity_session(room_id, user_data),
+            "user": {
+                "id": str(user_data.get("id", "")),
+                "name": user_data.get("global_name") or user_data.get("username") or "Guest",
+                "avatar_url": discord_avatar_url(user_data),
+            },
+        }
+    )
+
+
+async def activity_signal(request: web.Request) -> web.WebSocketResponse:
+    room_id = str(request.match_info["room_id"]).strip()[:80] or "default"
+    activity_session = verify_activity_session(request.query.get("token", ""), room_id)
+    if not activity_session:
+        raise web.HTTPUnauthorized(text="Invalid Activity session.")
+
+    websocket = web.WebSocketResponse(heartbeat=30)
+    await websocket.prepare(request)
+
+    room = activity_rooms.setdefault(room_id, set())
+    peer_id = ""
+
+    try:
+        async for message in websocket:
+            if message.type != web.WSMsgType.TEXT:
+                continue
+
+            try:
+                payload = json.loads(message.data)
+            except json.JSONDecodeError:
+                continue
+
+            payload_type = payload.get("type")
+            if payload_type == "join":
+                peer_id = str(payload.get("peerId", "")).strip()[:80]
+                if not peer_id:
+                    continue
+
+                websocket["peer_id"] = peer_id
+                room.add(websocket)
+                peers = [
+                    other.get("peer_id")
+                    for other in room
+                    if other is not websocket and other.get("peer_id")
+                ]
+                await websocket.send_json({"type": "peers", "peers": peers})
+
+            if not peer_id:
+                continue
+
+            payload["from"] = peer_id
+            target_peer_id = str(payload.get("to", "")).strip()
+            dead_sockets = []
+            for other in room:
+                if other is websocket:
+                    continue
+                if target_peer_id and other.get("peer_id") != target_peer_id:
+                    continue
+                try:
+                    await other.send_json(payload)
+                except ConnectionResetError:
+                    dead_sockets.append(other)
+
+            for dead_socket in dead_sockets:
+                room.discard(dead_socket)
+    finally:
+        room.discard(websocket)
+        if peer_id:
+            for other in list(room):
+                try:
+                    await other.send_json({"type": "peer-left", "from": peer_id})
+                except ConnectionResetError:
+                    room.discard(other)
+        if not room:
+            activity_rooms.pop(room_id, None)
+
+    return websocket
 
 
 async def dashboard_login_page(request: web.Request) -> web.Response:
@@ -1488,6 +1656,9 @@ async def start_dashboard() -> None:
 
     app = web.Application(middlewares=[dashboard_auth_middleware])
     app.router.add_get("/", dashboard_index)
+    app.router.add_get("/activity", activity_index)
+    app.router.add_post("/activity/token", activity_token)
+    app.router.add_get("/activity/ws/{room_id}", activity_signal)
     app.router.add_get("/login", dashboard_login_page)
     app.router.add_post("/api/login", dashboard_login)
     app.router.add_get("/auth/discord/start", dashboard_discord_start)
@@ -1546,6 +1717,7 @@ def start_tray_icon() -> None:
 
 DASHBOARD_TEMPLATE_PATH = Path(__file__).with_name("templates") / "dashboard.html"
 DASHBOARD_LOGIN_TEMPLATE_PATH = Path(__file__).with_name("templates") / "dashboard_login.html"
+ACTIVITY_TEMPLATE_PATH = Path(__file__).with_name("templates") / "activity.html"
 
 
 def load_dashboard_html() -> str:
@@ -1556,8 +1728,13 @@ def load_dashboard_login_html() -> str:
     return DASHBOARD_LOGIN_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
+def load_activity_html() -> str:
+    return ACTIVITY_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
 DASHBOARD_HTML = load_dashboard_html()
 DASHBOARD_LOGIN_HTML = load_dashboard_login_html()
+ACTIVITY_HTML = load_activity_html()
 
 
 def looks_like_playlist_query(query: str) -> bool:

@@ -103,6 +103,10 @@ Dashboard settings:
 - `SPOTIFY_CLIENT_ID=` and `SPOTIFY_CLIENT_SECRET=`: optional Spotify app credentials for Spotify track, album, and playlist links
 - `SPOTIFY_REDIRECT_URI=`: optional Spotify OAuth callback URL; defaults to `DASHBOARD_PUBLIC_URL/auth/spotify/callback`
 - `SPOTIFY_MARKET=US`: Spotify market used when resolving available tracks
+- `WATCH_TOGETHER_APPLICATION_ID=880218394199220334`: Discord Watch Together Activity application ID for `/watch_together`
+- `CUSTOM_ACTIVITY_APPLICATION_ID=` and `CUSTOM_ACTIVITY_CLIENT_SECRET=`: optional Discord Activity app credentials for `/screen_activity`; if blank, the bot reuses `DISCORD_CLIENT_ID` and `DISCORD_CLIENT_SECRET`
+
+To use `/screen_activity`, enable Activities for the Discord application in the Developer Portal and add a URL Mapping that points to your public dashboard URL's `/activity` path, for example `https://echsdee.duckdns.org/activity`. The Activity uses WebRTC browser screen capture inside Discord; users still choose what to share from their own client.
 
 Spotify playback uses Spotify metadata and YouTube audio search. Tracks and albums can be resolved with the app credentials above. Spotify playlist items require a connected Spotify user that owns or collaborates on the playlist; use the dashboard Admin tab's **Connect Spotify** button after adding the callback URL to your Spotify app.
 
