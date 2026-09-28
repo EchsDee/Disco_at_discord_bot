@@ -28,6 +28,25 @@ function setStatus(text) {
   statusPill.textContent = text;
 }
 
+function showStreamInMainPanel(stream) {
+  localVideo.muted = true;
+  localVideo.srcObject = stream;
+  emptyState.style.display = "none";
+  localVideo.play().catch(() => {
+    notice.textContent = "The stream is ready. Click inside the Activity if Discord pauses playback.";
+  });
+}
+
+function refreshEmptyState() {
+  if (localStream || remoteStreams.size > 0) {
+    emptyState.style.display = "none";
+    return;
+  }
+
+  localVideo.srcObject = null;
+  emptyState.style.display = "";
+}
+
 function send(payload) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({ peerId, ...payload }));
@@ -165,15 +184,25 @@ async function handleCandidate(message) {
 }
 
 function renderRemoteTile(remotePeerId, stream) {
+  if (!captureMode && !localVideo.srcObject) {
+    showStreamInMainPanel(stream);
+  }
+
   let tile = document.getElementById(`peer-${remotePeerId}`);
   if (!tile) {
     tile = document.createElement("article");
     tile.className = "tile";
     tile.id = `peer-${remotePeerId}`;
-    tile.innerHTML = `<video autoplay playsinline></video><div class="tile-label">Remote screen</div>`;
+    tile.innerHTML = `<video autoplay muted playsinline></video><div class="tile-label">Remote screen</div>`;
     remoteGrid.appendChild(tile);
   }
-  tile.querySelector("video").srcObject = stream;
+
+  const video = tile.querySelector("video");
+  video.muted = true;
+  video.srcObject = stream;
+  video.play().catch(() => {
+    notice.textContent = "A remote screen connected, but Discord paused playback. Click inside the Activity and try again.";
+  });
 }
 
 function removePeer(remotePeerId) {
@@ -183,6 +212,15 @@ function removePeer(remotePeerId) {
   knownPeers.delete(remotePeerId);
   remoteStreams.delete(remotePeerId);
   document.getElementById(`peer-${remotePeerId}`)?.remove();
+
+  if (!captureMode && localVideo.srcObject) {
+    const nextStream = remoteStreams.values().next().value;
+    if (nextStream) {
+      showStreamInMainPanel(nextStream);
+    } else {
+      refreshEmptyState();
+    }
+  }
 }
 
 function connectSignaling() {
@@ -202,6 +240,9 @@ function connectSignaling() {
     if (message.from === peerId) return;
 
     if (message.type === "peers") {
+      if (captureMode) {
+        setStatus(`Capture window connected (${(message.peers || []).length} viewer${(message.peers || []).length === 1 ? "" : "s"})`);
+      }
       for (const remotePeerId of message.peers || []) {
         knownPeers.add(remotePeerId);
         if (localStream) await offerShareTo(remotePeerId);
@@ -214,6 +255,9 @@ function connectSignaling() {
     if (message.type === "offer") await handleOffer(message);
     if (message.type === "answer") await handleAnswer(message);
     if (message.type === "candidate") await handleCandidate(message);
+    if (message.type === "share-started" && !captureMode) {
+      setStatus("Receiving screen...");
+    }
     if (message.type === "share-stopped" || message.type === "peer-left") removePeer(message.from);
   });
 
@@ -245,7 +289,7 @@ function stopSharing() {
   for (const track of localStream.getTracks()) track.stop();
   localStream = null;
   localVideo.srcObject = null;
-  emptyState.style.display = "";
+  refreshEmptyState();
   shareButton.disabled = false;
   stopButton.disabled = true;
   send({ type: "share-stopped" });
