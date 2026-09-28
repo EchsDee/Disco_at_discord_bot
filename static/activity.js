@@ -19,9 +19,9 @@ let lastRelayFrameAt = 0;
 let relayImageUrl = "";
 let relayEncoding = false;
 const RELAY_FRAME_INTERVAL_MS = 33;
-const RELAY_MAX_WIDTH = 720;
-const RELAY_JPEG_QUALITY = 0.38;
-const RELAY_MAX_BUFFERED_BYTES = 500_000;
+const RELAY_MAX_WIDTH = 960;
+const RELAY_JPEG_QUALITY = 0.52;
+const RELAY_MAX_BUFFERED_BYTES = 800_000;
 
 const statusPill = document.getElementById("statusPill");
 const localVideo = document.getElementById("localVideo");
